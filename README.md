@@ -28,6 +28,17 @@ Shared logic (config, DB, AWS provisioning, upload, sync, CLI helpers) lives und
    brew install awscli   # macOS
    ```
 
+   Linux:
+
+   ```bash
+   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+   unzip awscliv2.zip
+   sudo ./aws/install
+   ```
+
+   (or `sudo apt install awscli` / `sudo yum install awscli` via your distro's package
+   manager, though those often lag behind the official installer above)
+
 2. Configure the `caucellcloud-lab-operator` profile with the `lab-operator` IAM user's
    static access key (get these from `terraform output -raw lab_operator_access_key_id`
    / `-raw lab_operator_secret_access_key`):
@@ -104,7 +115,8 @@ From inside `LabCloud.jl/`:
 ```
 
 To use them as bare commands (`labcustomers ...` / `labvendors ...`) from anywhere,
-put `LabCloud.jl/` on your `PATH`, e.g. in `~/.zshrc`:
+put `LabCloud.jl/` on your `PATH`, e.g. in `~/.zshrc` (macOS default shell) or `~/.bashrc`
+(Linux default shell):
 
 ```bash
 export PATH="$PATH:/path/to/LabCloud.jl"
