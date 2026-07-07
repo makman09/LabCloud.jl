@@ -1,0 +1,236 @@
+"""
+    Status
+
+Julia port of `src/status.py` — read-only NAS<->DB<->AWS reconcile (`status_report`,
+`render_status`). Never provisions, uploads, mutates the DB, or touches sync-progress
+files. Both probes (bucket via `head_bucket`, IAM via `list_access_keys`) go through the
+single `assume_lab_operator()` session. Drift is the same size+mtime `compute_sync_delta`
+that `push` uses, so the NAS-ahead count matches exactly what a push would upload.
+"""
+module Status
+
+using SQLite
+
+using ..Config: config
+using ..DB: init_db
+using ..Util: AppError, fmt_size, validate_customer_name
+using ..AWSIdent: AWSIdent, assume_lab_operator, _error_code
+using ..Sync: Sync, README_NAME, discover_nas_researchers, build_local_manifest,
+              build_root_readme_local_manifest, build_s3_manifest, compute_sync_delta
+
+const IAM = AWSIdent.IAM
+const S3 = AWSIdent.S3
+
+export status_report, render_status
+
+# Per-researcher bucket roles. Each researcher has a single `research-{name}` bucket. A
+# customer-facing delivery bucket is deliberately decoupled and not probed (see CLAUDE.md).
+const BUCKET_ROLES = ("research",)
+
+# role => (nas_ahead_label, s3_ahead_label, prefixes_to_scan). "" is the bucket root, scanned
+# for README.md only (see reconcile_bucket).
+const RECONCILE = Dict(
+    "research" => ("archive push needed", "drift — investigate",
+                   ("", "Data/", "Result/", "Archive/", "Other/")),
+)
+
+"""True if the bucket exists, false on 404/NoSuchBucket. Re-raises other errors."""
+function probe_bucket_exists(s3, bucket_name)
+    try
+        S3.head_bucket(bucket_name; aws_config=s3)
+        return true
+    catch e
+        (_error_code(e) in ("404", "NoSuchBucket", "NotFound") ||
+         occursin("404", sprint(showerror, e)) || occursin("NoSuchBucket", sprint(showerror, e))) && return false
+        rethrow()
+    end
+end
+
+"""
+True if `LabCustomer-{name}` exists. Uses `list_access_keys` (already granted to the
+provisioner) rather than `get_user`, so no extra `iam:GetUser` grant is needed.
+"""
+function probe_iam_user_exists(iam_prov, name)
+    try
+        IAM.list_access_keys(Dict("UserName" => "LabCustomer-$name"); aws_config=iam_prov)
+        return true
+    catch e
+        occursin("NoSuchEntity", sprint(showerror, e)) && return false
+        rethrow()
+    end
+end
+
+"""Reconcile one bucket against NAS across the role's full prefix set (read-only)."""
+function reconcile_bucket(s3_phi, bucket_name, role, name, nas_root)
+    nas_ahead_label, s3_ahead_label, prefixes = RECONCILE[role]
+    researcher_root = joinpath(nas_root, name)
+    results = Any[]
+
+    for prefix in prefixes
+        is_root = prefix == ""
+        if is_root
+            # Root: reconcile only README.md (researcher-root → bucket-root `README.md`).
+            local_manifest = build_root_readme_local_manifest(researcher_root)
+            s3_manifest = build_s3_manifest(s3_phi, bucket_name, README_NAME)
+        else
+            local_dir = joinpath(researcher_root, rstrip(prefix, '/'))
+            local_manifest = isdir(local_dir) ? build_local_manifest(local_dir) :
+                             Dict{String,Sync.LocalEntry}()
+            s3_manifest = build_s3_manifest(s3_phi, bucket_name, prefix)
+        end
+
+        # size+mtime delta — same rule `push` uses, so this count matches exactly what
+        # a push would actually upload (missing, size differs, or locally newer).
+        to_upload = compute_sync_delta(local_manifest, s3_manifest, prefix)
+
+        local_keys = Set("$prefix$rel" for rel in keys(local_manifest))
+        # At the root the provisioned README.md placeholder is managed state, not drift, so an
+        # S3-only README is expected — don't report it as an orphan.
+        orphans = is_root ? String[] : [k for k in keys(s3_manifest) if !(k in local_keys)]
+
+        push!(results, (
+            prefix = is_root ? README_NAME : prefix,
+            local_files = length(local_manifest),
+            s3_files = length(s3_manifest),
+            local_bytes = sum(Int[v.size for v in values(local_manifest)]),
+            nas_ahead = length(to_upload),
+            orphans = length(orphans),
+            nas_ahead_label = nas_ahead_label,
+            s3_ahead_label = s3_ahead_label,
+        ))
+    end
+    return results
+end
+
+"""Per-researcher block: IAM user + each per-researcher bucket's existence/reconcile."""
+function reconcile_researcher(name, in_db, nas_root, iam_prov, s3_phi)
+    buckets = Dict{String,Any}()
+    for role in BUCKET_ROLES
+        bucket_name = "$role-$(lowercase(name))"
+        if !probe_bucket_exists(s3_phi, bucket_name)
+            buckets[role] = (bucket=bucket_name, exists=false, prefixes=nothing)
+        else
+            buckets[role] = (bucket=bucket_name, exists=true,
+                             prefixes=reconcile_bucket(s3_phi, bucket_name, role, name, nas_root))
+        end
+    end
+    return (
+        name = name,
+        in_db = in_db,
+        nas_present = isdir(joinpath(nas_root, name)),
+        iam_user = probe_iam_user_exists(iam_prov, name),
+        buckets = buckets,
+    )
+end
+
+"""
+    status_report(; researcher_filter="", nas_path="") -> NamedTuple
+
+Reconcile NAS vs DB vs AWS for each researcher. Pure read-only. Empty `researcher_filter`
+means whole-volume; empty `nas_path` falls back to `config().nas_research_path`. Mirrors
+`src/status.py::status_report`.
+"""
+function status_report(; researcher_filter="", nas_path="")
+    nas_path = isempty(nas_path) ? config().nas_research_path : nas_path
+
+    conn = init_db()
+    db_names = Set(row.customer_name for row in
+                   SQLite.DBInterface.execute(conn, "SELECT customer_name FROM customers"))
+    close(conn)
+
+    if !isempty(researcher_filter)
+        validate_customer_name(researcher_filter)
+        targets = [researcher_filter]
+        on_nas = isdir(joinpath(nas_path, researcher_filter))
+        on_nas_not_in_db = (on_nas && !(researcher_filter in db_names)) ? [researcher_filter] : String[]
+        in_db_not_on_nas = (researcher_filter in db_names && !on_nas) ? [researcher_filter] : String[]
+    else
+        nas_researchers = discover_nas_researchers(nas_path)
+        targets = nas_researchers
+        nas_set = Set(nas_researchers)
+        on_nas_not_in_db = sort(collect(setdiff(nas_set, db_names)))
+        in_db_not_on_nas = sort(collect(setdiff(db_names, nas_set)))
+    end
+
+    researchers = Any[]
+    if !isempty(targets)
+        # One LabOperatorRole session serves both probes (Python: one session, two client
+        # handles) — the `iam_prov`/`s3_phi` parameter names survive for line-by-line
+        # mirroring of src/status.py.
+        operator = assume_lab_operator()
+        for name in targets
+            push!(researchers, reconcile_researcher(name, name in db_names, nas_path, operator, operator))
+        end
+    end
+
+    return (
+        nas_path = nas_path,
+        on_nas_not_in_db = on_nas_not_in_db,
+        in_db_not_on_nas = in_db_not_on_nas,
+        researchers = researchers,
+    )
+end
+
+"""
+    render_status(report)
+
+Render a `status_report` NamedTuple to stdout. Line shapes mirror `src/status.py::render_status`
+(a bare `click.echo()` is a blank line; column pads via `rpad`; em-dash label `drift — investigate`).
+"""
+function render_status(report)
+    println("NAS: $(report.nas_path)")
+    println()
+
+    if !isempty(report.on_nas_not_in_db)
+        println("On NAS, not in DB (needs provisioning): $(join(report.on_nas_not_in_db, ", "))")
+    end
+    if !isempty(report.in_db_not_on_nas)
+        println("In DB, not on NAS (orphaned row / NAS unmounted): $(join(report.in_db_not_on_nas, ", "))")
+    end
+    if !isempty(report.on_nas_not_in_db) || !isempty(report.in_db_not_on_nas)
+        println()
+    end
+
+    total_nas_ahead = 0
+    total_orphans = 0
+    needs_prov = 0
+
+    for r in report.researchers
+        r.in_db || (needs_prov += 1)
+        db_tag = r.in_db ? "db: present" : "db: MISSING — needs provisioning"
+        println("$(r.name)   [$db_tag]")
+        if !r.nas_present
+            println("  ⚠ researcher directory not found on NAS — orphan counts reflect S3-only inventory")
+        end
+
+        for role in BUCKET_ROLES
+            b = r.buckets[role]
+            if !b.exists
+                println("  $(rpad(b.bucket, 34)) not provisioned")
+                continue
+            end
+            println("  $(rpad(b.bucket, 34)) exists")
+            for p in b.prefixes
+                total_nas_ahead += p.nas_ahead
+                total_orphans += p.orphans
+                line = "      $(rpad(p.prefix, 10)) $(p.local_files) files, " *
+                       "$(p.nas_ahead) push, $(p.orphans) orphans ($(fmt_size(p.local_bytes)))"
+                if p.nas_ahead > 0 && !isempty(p.nas_ahead_label)
+                    line *= "  [$(p.nas_ahead_label)]"
+                end
+                if p.orphans > 0 && !isempty(p.s3_ahead_label)
+                    line *= "  [$(p.s3_ahead_label)]"
+                end
+                println(line)
+            end
+        end
+
+        println("  iam LabCustomer-$(rpad(r.name, 22)) $(r.iam_user ? "present" : "MISSING")")
+        println()
+    end
+
+    println("Summary: $(length(report.researchers)) researcher(s) | $needs_prov needs provisioning | " *
+            "$total_nas_ahead NAS-ahead | $total_orphans orphans")
+end
+
+end # module Status

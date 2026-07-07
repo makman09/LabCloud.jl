@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Launcher for the Lab Vendors CLI. Resolves its own location so it works from any
+# directory, and bakes in --project / --sysimage. If lab.so hasn't been built yet it
+# still runs (just slowly — AWS.jl recompiles), with a one-line heads-up.
+#
+#   LabCloud.jl/bin/labvendors list
+#   labvendors create ...            # if bin/ is on PATH
+set -euo pipefail
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+sysimage=()
+if [[ -f "$here/lab.so" ]]; then
+  sysimage=(--sysimage "$here/lab.so")
+else
+  echo "labvendors: $here/lab.so not found — running without sysimage (slow; build with 'julia --project=$here $here/build_sysimage.jl')" >&2
+fi
+exec julia --project="$here" "${sysimage[@]}" "$here/LabVendorAPI.jl" "$@"
