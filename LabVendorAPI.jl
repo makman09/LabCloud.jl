@@ -252,5 +252,10 @@ Comonicon.@main
 end # module VendorCLI
 
 # `run_cli` (LabAPI.CLI) converts an AppError into Click-style "Error: <msg>" output instead
-# of a stacktrace dump — see LabCustomersAPI.jl / its docstring.
-run_cli(VendorCLI.command_main)
+# of a stacktrace dump — see LabCustomersAPI.jl / its docstring. Guarded on
+# `PROGRAM_FILE == @__FILE__` (Julia's `if __name__ == "__main__"`) so `build_sysimage.jl`'s
+# precompile step can `include` this file to warm the CLI dispatch without the run exiting
+# the build. The bin wrappers invoke this file as the script, so the guard is true there.
+if abspath(PROGRAM_FILE) == @__FILE__
+    run_cli(VendorCLI.command_main)
+end

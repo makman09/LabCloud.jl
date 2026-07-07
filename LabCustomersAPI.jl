@@ -420,5 +420,10 @@ Comonicon.@main
 end # module CustomersCLI
 
 # `run_cli` (LabAPI.CLI) wraps `command_main` so an `AppError` prints Click-style
-# "Error: <msg>" instead of a stacktrace dump — see its docstring.
-run_cli(CustomersCLI.command_main)
+# "Error: <msg>" instead of a stacktrace dump — see its docstring. Guarded on
+# `PROGRAM_FILE == @__FILE__` (Julia's `if __name__ == "__main__"`) so `build_sysimage.jl`'s
+# precompile step can `include` this file to warm the CLI dispatch without the run exiting
+# the build. The bin wrappers invoke this file as the script, so the guard is true there.
+if abspath(PROGRAM_FILE) == @__FILE__
+    run_cli(CustomersCLI.command_main)
+end
