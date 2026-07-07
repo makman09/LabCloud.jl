@@ -3,10 +3,19 @@
 # directory, and bakes in --project / --sysimage. If lab.so hasn't been built yet it
 # still runs (just slowly — AWS.jl recompiles), with a one-line heads-up.
 #
-#   LabCloud.jl/bin/labvendors list
-#   labvendors create ...            # if bin/ is on PATH
+#   ./labvendors list                # from inside LabCloud.jl/
+#   labvendors create ...            # if LabCloud.jl/ is on PATH
 set -euo pipefail
-here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve through symlinks so `here` is this launcher's real directory (the LabCloud.jl
+# project root) even when invoked via a symlink on PATH. readlink -f isn't portable, so
+# walk the link chain by hand.
+source="${BASH_SOURCE[0]}"
+while [[ -L "$source" ]]; do
+  dir="$(cd -P -- "$(dirname -- "$source")" && pwd)"
+  source="$(readlink -- "$source")"
+  [[ "$source" != /* ]] && source="$dir/$source"
+done
+here="$(cd -P -- "$(dirname -- "$source")" && pwd)"
 sysimage=()
 if [[ -f "$here/lab.so" ]]; then
   sysimage=(--sysimage "$here/lab.so")
