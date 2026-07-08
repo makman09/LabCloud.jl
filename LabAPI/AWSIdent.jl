@@ -201,11 +201,27 @@ end
     assume(base, role_arn; mfa=nothing, session_name) -> LabConfig
 
 Hand-rolled `sts:AssumeRole`, mirroring `src/aws.py`. Without `mfa`, a plain assume-role.
-With `mfa`, first resolves the caller's IAM username (`sts:GetCallerIdentity`), looks up
-their MFA device serial (`iam:ListMFADevices`) — raising the exact
-`click.ClickException`-equivalent `AppError` message if none exists — then assumes with
-`SerialNumber`/`TokenCode`. Returns a fresh `LabConfig` carrying the SAME endpoint, so the
-assumed session still resolves against LocalStack under the harness.
+
+With `mfa`, does NOT pass `SerialNumber`/`TokenCode` straight to `sts:AssumeRole` — confirmed
+empirically (real AWS, both via this CLI and raw `aws sts assume-role`) that when the target
+role's trust policy has ANY statement that would also allow the same principal to assume it
+without MFA, STS does not reliably exercise the MFA-validation path on a single-step
+AssumeRole-with-MFA call, and the resulting session ends up WITHOUT
+`aws:MultiFactorAuthPresent=true` even given a valid code — silently defeating every
+MFA-gated Sid in the role's permission policy. (A trust-policy-only fix — making the no-MFA
+statement's `Condition` mutually exclusive with MFA presence — was tried and did not resolve
+it either.)
+
+Instead: resolve the caller's IAM username (`sts:GetCallerIdentity`) and MFA device serial
+(`iam:ListMFADevices`) — raising the exact `click.ClickException`-equivalent `AppError`
+message if none exists — then call `sts:GetSessionToken` with `SerialNumber`/`TokenCode` to
+get temporary, MFA'd credentials for `base`'s OWN identity (no trust-policy statement
+matching involved at all, so there's no ambiguous path for STS to skip MFA validation on).
+Only THEN call `sts:AssumeRole` (no MFA params — none needed) from that already-MFA'd
+session; STS propagates `aws:MultiFactorAuthPresent=true` from a caller's session into any
+role it assumes, which is unambiguous, well-established behavior. Returns a fresh `LabConfig`
+carrying the SAME endpoint, so the assumed session still resolves against LocalStack under
+the harness.
 """
 function assume(base::LabConfig, role_arn; mfa=nothing, session_name="lab-session")
     creds_dict = if mfa === nothing
@@ -218,11 +234,19 @@ function assume(base::LabConfig, role_arn; mfa=nothing, session_name="lab-sessio
         mfa_resp = IAM.list_mfadevices(Dict("UserName" => username); aws_config=base)
         serial = _first_mfa_serial(mfa_resp, username)
 
-        result = STS.assume_role(
-            role_arn, session_name,
-            Dict("SerialNumber" => serial, "TokenCode" => mfa);
-            aws_config=base,
+        session_token_result = STS.get_session_token(
+            Dict("SerialNumber" => serial, "TokenCode" => mfa); aws_config=base,
         )
+        mfa_creds_dict = session_token_result["GetSessionTokenResult"]["Credentials"]
+        mfa_base = LabConfig(
+            AWSCredentials(
+                mfa_creds_dict["AccessKeyId"], mfa_creds_dict["SecretAccessKey"],
+                mfa_creds_dict["SessionToken"],
+            ),
+            base.region, base.endpoint,
+        )
+
+        result = STS.assume_role(role_arn, session_name; aws_config=mfa_base)
         result["AssumeRoleResult"]["Credentials"]
     end
 
