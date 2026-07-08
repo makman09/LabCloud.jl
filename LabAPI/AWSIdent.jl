@@ -17,6 +17,7 @@ below for why S3 doesn't need special-casing to avoid virtual-hosted-style addre
 module AWSIdent
 
 using AWS: AWS, @service, AbstractAWSConfig, AWSCredentials
+using Dates
 using ..Config: config
 using ..Util: AppError, as_vector, _parse_iso8601
 
@@ -60,6 +61,97 @@ function AWS.generate_service_url(c::LabConfig, service::String, resource::Strin
         return AWS.generate_service_url(AWS.AWSConfig(; creds=c.creds, region=c.region), service, resource)
     end
     return string(rstrip(c.endpoint, '/'), resource)
+end
+
+"""
+    AWS.sign_aws4!(aws::LabConfig, request::AWS.Request, time::Dates.DateTime) -> AWS.Request
+
+Correctness fix for a real bug in installed `AWS.jl` 1.98.1's `sign_aws4!`. Its
+`canonical_headers` are built by sorting the joined `"name:value"` strings, while
+`signed_headers` (and the `SignedHeaders` it puts in the `Authorization` header) are built by
+sorting header *names* only. Those two orderings diverge whenever one signed header name is a
+strict prefix of another, because `-` (0x2D) sorts before `:` (0x3A): the longer name's
+`"name:value"` string then sorts BEFORE the shorter name's, even though the shorter name must
+come first when sorting by name alone. That's exactly what happens with S3's
+`x-amz-server-side-encryption` / `x-amz-server-side-encryption-aws-kms-key-id` pair, which
+`create_prefix_structure`/`create_lab_iam_user` send together — the client ends up signing a
+canonical request in one header order while declaring `SignedHeaders` in the other, so AWS
+recomputes a different hash and returns `SignatureDoesNotMatch`. Reproduced against real S3
+(not caught by LocalStack's laxer signature verification, which is why the module docstring
+in `Provision.jl` previously called this path "confirmed" safe).
+
+Otherwise a byte-for-byte copy of `AWS.sign_aws4!`, with `canonical_headers` sorted by header
+name (matching `signed_headers`) instead of by the joined string. Dispatches on `LabConfig`
+so it only overrides signing for our own config type — every other `AbstractAWSConfig` keeps
+using AWS.jl's stock method.
+"""
+function AWS.sign_aws4!(aws::LabConfig, request::AWS.Request, time::DateTime)
+    date = Dates.format(time, dateformat"yyyymmdd")
+    datetime = Dates.format(time, dateformat"yyyymmdd\THHMMSS\Z")
+
+    authentication_scope = [date, AWS.region(aws), request.service, "aws4_request"]
+
+    creds = AWS.refresh!(AWS.credentials(aws))
+    signing_key = Vector{UInt8}("AWS4$(creds.secret_key)")
+    for scope in authentication_scope
+        signing_key = AWS.hmac_sha256(signing_key, scope)
+    end
+    authentication_scope = join(authentication_scope, "/")
+
+    content_hash = bytes2hex(AWS.sha256(request.content))
+
+    delete!(request.headers, "Authorization")
+    merge!(
+        request.headers,
+        Dict(
+            "x-amz-content-sha256" => content_hash,
+            "x-amz-date" => datetime,
+            "Content-MD5" => AWS.base64encode(AWS.md5(request.content)),
+        ),
+    )
+    if !isempty(creds.token)
+        request.headers["x-amz-security-token"] = creds.token
+    end
+
+    # The fix: sort by header NAME (matching `signed_headers`), not by the joined
+    # "name:value" string — see docstring for why the two diverge.
+    sorted_names = sort!(collect(keys(request.headers)); by=lowercase)
+    canonical_headers = join(
+        ["$(lowercase(k)):$(strip(request.headers[k]))" for k in sorted_names], "\n"
+    )
+    signed_headers = join([lowercase(k) for k in sorted_names], ";")
+
+    uri = AWS.HTTP.URI(request.url)
+    query = sort!(AWS.HTTP.URIs.queryparampairs(uri.query))
+
+    canonical_form = string(
+        request.request_method,
+        "\n",
+        request.service == "s3" ? uri.path : AWS.HTTP.escapepath(uri.path),
+        "\n",
+        AWS.HTTP.escapeuri(query),
+        "\n",
+        canonical_headers,
+        "\n\n",
+        signed_headers,
+        "\n",
+        content_hash,
+    )
+
+    canonical_hash = bytes2hex(AWS.sha256(canonical_form))
+    string_to_sign = "AWS4-HMAC-SHA256\n$datetime\n$authentication_scope\n$canonical_hash"
+    signature = bytes2hex(AWS.hmac_sha256(signing_key, string_to_sign))
+
+    request.headers["Authorization"] = join(
+        [
+            "AWS4-HMAC-SHA256 Credential=$(creds.access_key_id)/$authentication_scope",
+            "SignedHeaders=$signed_headers",
+            "Signature=$signature",
+        ],
+        ", ",
+    )
+
+    return request
 end
 
 _endpoint() = get(ENV, "AWS_ENDPOINT_URL", nothing)

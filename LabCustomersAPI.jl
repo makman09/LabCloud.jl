@@ -8,7 +8,7 @@ their associated resources, and sync research data from NAS to S3 (plan/apply pu
 single write guard — `--dry-run` is apply minus writes).
 """
 
-include(joinpath(@__DIR__, "src", "LabAPI", "LabAPI.jl"))
+include(joinpath(@__DIR__, "LabAPI", "LabAPI.jl"))
 using .LabAPI
 using SQLite
 

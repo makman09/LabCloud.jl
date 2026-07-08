@@ -58,9 +58,9 @@ end
 
 const _dotenv_loaded = Ref(false)
 
-# Project root (LabCloud.jl/) is a fixed two levels up from this file's directory
-# (src/LabAPI/ → src/ → LabCloud.jl/) — the `.env` / `.env.example` live there.
-const _DOTENV_PATH = joinpath(dirname(dirname(@__DIR__)), ".env")
+# Project root (LabCloud.jl/) is a fixed one level up from this file's directory
+# (LabAPI/ → LabCloud.jl/) — the `.env` / `.env.example` live there.
+const _DOTENV_PATH = joinpath(dirname(@__DIR__), ".env")
 
 """
     _load_dotenv()

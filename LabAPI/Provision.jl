@@ -20,10 +20,19 @@ So these six calls bypass the generated wrappers entirely: hand-build the XML (o
 bucket policy, plain JSON — S3 does NOT wrap the policy body in XML) and PUT it via the raw
 `AWS.AWSServices.s3` REST-XML callable under `"body"`. Genuine header-shaped params (SSE
 headers on `put_object`, the object-lock-enabled header on `create_bucket`) go through the
-same functor's `"headers"` key instead — that path IS handled correctly by the generated
-wrappers, so `create_prefix_structure`/`create_lab_iam_user` use them directly, no bypass
-needed. This is the harness's "Risk #3" finding, cross-checked against boto3 on the same
-LocalStack instance to confirm the intended shapes.
+same functor's `"headers"` key instead — that path IS shape-correct in the generated
+wrappers (the headers land as real HTTP headers, not query params), so
+`create_prefix_structure`/`create_lab_iam_user` use them directly, no bypass needed. This is
+the harness's "Risk #3" finding, cross-checked against boto3 on the same LocalStack instance
+to confirm the intended shapes.
+
+Separately (found against real AWS, not LocalStack): sending the SSE-KMS header pair
+`x-amz-server-side-encryption`/`x-amz-server-side-encryption-aws-kms-key-id` together used to
+trip a `SignatureDoesNotMatch` from installed `AWS.jl` 1.98.1's `sign_aws4!` — one header name
+is a strict prefix of the other, which its canonical-header sort orders inconsistently with
+`SignedHeaders`. Fixed via an `AWS.sign_aws4!(::LabConfig, ...)` override in `AWSIdent.jl`
+(see that docstring); LocalStack never caught it because it doesn't strictly verify SigV4
+canonical header ordering.
 """
 module Provision
 

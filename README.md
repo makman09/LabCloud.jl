@@ -10,7 +10,7 @@ lifecycle of:
   (`LabVendorAPI.jl`).
 
 Shared logic (config, DB, AWS provisioning, upload, sync, CLI helpers) lives under
-`src/LabAPI/`.
+`LabAPI/`.
 
 ## Requirements
 
@@ -95,7 +95,7 @@ julia --project=. build_sysimage.jl
 ```
 
 This produces `lab.so` in the project root. It takes a few minutes. Rebuild it whenever
-you change code under `src/LabAPI/`, `LabCustomersAPI.jl`, or `LabVendorAPI.jl`, or update
+you change code under `LabAPI/`, `LabCustomersAPI.jl`, or `LabVendorAPI.jl`, or update
 dependencies.
 
 ## Running

@@ -8,7 +8,7 @@ vendor can upload raw seq data, mint per-order `{uuid}/` prefixes, rotate creden
 remove vendors (MFA-gated).
 """
 
-include(joinpath(@__DIR__, "src", "LabAPI", "LabAPI.jl"))
+include(joinpath(@__DIR__, "LabAPI", "LabAPI.jl"))
 using .LabAPI
 using SQLite
 

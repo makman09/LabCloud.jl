@@ -16,7 +16,7 @@ using Test
 # config() requires LAB_OPERATOR_ROLE_ARN; DB_PATH is overridden per-test by withdb().
 get!(ENV, "LAB_OPERATOR_ROLE_ARN", "arn:aws:iam::000000000000:role/x")
 
-include(joinpath(@__DIR__, "..", "src", "LabAPI", "LabAPI.jl"))
+include(joinpath(@__DIR__, "..", "LabAPI", "LabAPI.jl"))
 using .LabAPI
 using SQLite
 using JSON3
