@@ -1,11 +1,16 @@
 """
     AWSIdent
 
-Julia port of `src/aws.py` — the two-identity session model: `assume_lab_operator()` (the
-consolidated LabOperatorRole, refreshable, no MFA) for everything routine, and
-`assume_bypass_role(mfa_code)` (S3PhiBypassRole, MFA-gated, one-shot) for the delete flow's
-governance-retention version wipe. `get_admin_session()` exists only to bootstrap the MFA
-device lookup, exactly like Python.
+Two ways of landing in the same `LabOperatorRole`, per its terraform trust policy
+(`iam.tf`): `assume_lab_operator()` (refreshable, no MFA, `RoutineAutomationNoMfa` Sid) for
+everything routine, and `assume_bypass_role(mfa_code)` (one-shot, `BypassDeleteRequiresMfa`
+Sid, restricted to `var.bypass_user_arns`) for the delete flow's governance-retention version
+wipe. `S3PhiBypassRole` used to be a separate role for that second path — it was folded into
+`LabOperatorRole`, with the destructive S3 actions gated by their own
+`aws:MultiFactorAuthPresent` condition in the role's permission policy instead of by being a
+different role entirely. `get_admin_session()` exists only to bootstrap the MFA device
+lookup, exactly like Python (now against the `AWS_BYPASS_PROFILE` local profile rather than a
+hardcoded name).
 
 AWS.jl has no `AWS_ENDPOINT_URL` support (unlike boto3/botocore), so every identity here is
 carried as a `LabConfig` — an `AbstractAWSConfig` that, when `endpoint` is set, forces
@@ -272,19 +277,27 @@ end
 """
     get_admin_session() -> LabConfig
 
-Plain `caucellcloud` admin profile (hardcoded name, matching `src/aws.py`).
+Base session for `config().bypass_profile` (env `AWS_BYPASS_PROFILE`, default
+`caucellcloud`) — a local AWS CLI profile for a human admin identity listed in terraform's
+`bypass_user_arns`, distinct from the `lab-operator` service user `assume_lab_operator()`
+uses. Only exists to bootstrap the MFA device lookup in `assume_bypass_role`.
 """
-get_admin_session() = make_config("caucellcloud")
+get_admin_session() = make_config(config().bypass_profile)
 
 """
     assume_bypass_role(mfa_code) -> LabConfig
 
-`S3PhiBypassRole`, gated on the admin user's TOTP MFA code. Raises `AppError` if the admin
-user has no MFA device registered.
+Assumes `LabOperatorRole` — the SAME role ARN as `assume_lab_operator()` — but via the
+admin session's `BypassDeleteRequiresMfa` trust statement, gated on the admin user's TOTP MFA
+code. That MFA claim on the resulting session is what unlocks the role's destructive
+`BypassAndDeleteLockedObjects`/`ListResearchPhiBuckets` policy Sids (each carries its own
+`aws:MultiFactorAuthPresent` condition — a `assume_lab_operator()` session can never satisfy
+it, only this MFA'd one can). Raises `AppError` if the admin user has no MFA device
+registered.
 """
 function assume_bypass_role(mfa_code)
     admin = get_admin_session()
-    return assume(admin, config().bypass_role_arn; mfa=mfa_code, session_name="bypass-delete")
+    return assume(admin, config().role_arn; mfa=mfa_code, session_name="bypass-delete")
 end
 
 """

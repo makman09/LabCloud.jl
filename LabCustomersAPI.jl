@@ -371,7 +371,7 @@ Delete a lab customer, their IAM user, and bucket. Requires MFA.
 
 # Options
 
-- `--mfa=<code>`: TOTP code for S3PhiBypassRole assumption.
+- `--mfa=<code>`: TOTP code for the MFA-gated LabOperatorRole bypass-delete assumption.
 
 # Flags
 

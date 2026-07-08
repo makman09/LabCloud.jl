@@ -231,7 +231,7 @@ Delete a lab vendor, their IAM user, landing bucket, and orders. Requires MFA.
 
 # Options
 
-- `--mfa=<code>`: TOTP code for S3PhiBypassRole assumption.
+- `--mfa=<code>`: TOTP code for the MFA-gated LabOperatorRole bypass-delete assumption.
 
 # Flags
 

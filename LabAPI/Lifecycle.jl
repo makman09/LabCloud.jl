@@ -160,8 +160,9 @@ end
 MFA-gated teardown: delete the IAM user, empty the versioned bucket under governance bypass,
 delete the bucket, and purge the registry row(s). Idempotent against partially-gone state (a
 missing IAM user or bucket is logged and skipped). IAM/bucket teardown runs as the lab
-operator; ONLY the version wipe uses the MFA-gated bypass role. Mirrors the (now inlined)
-`delete_customer`/`delete_vendor` bodies in the Python CLIs.
+operator; ONLY the version wipe uses the MFA-gated bypass session (`LabOperatorRole` assumed
+by the human admin identity with a fresh MFA factor — see `AWSIdent.assume_bypass_role`).
+Mirrors the (now inlined) `delete_customer`/`delete_vendor` bodies in the Python CLIs.
 """
 function mfa_delete(spec::EntitySpec, name, bucket_name, mfa_code)
     username = "$(spec.user_prefix)$name"

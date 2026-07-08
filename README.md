@@ -65,8 +65,17 @@ Shared logic (config, DB, AWS provisioning, upload, sync, CLI helpers) lives und
    ```
 
    `LabAPI` reads this profile via `AWS_PROFILE` (see below), so the name must match
-   exactly. The `delete` command's MFA-gated `S3PhiBypassRole` assumption also relies on
-   this profile's underlying IAM user having an MFA device registered.
+   exactly.
+
+   The `delete` command's MFA-gated bypass-delete step is separate: it needs its own local
+   profile (`AWS_BYPASS_PROFILE`, default `caucellcloud`) pointing at a human admin
+   identity — one of terraform's `bypass_user_arns`, NOT the `lab-operator` service user
+   above — with an MFA device registered. It assumes the same `LabOperatorRole`, just via
+   its MFA-gated trust statement:
+
+   ```bash
+   aws configure --profile caucellcloud
+   ```
 
 3. Install Julia dependencies:
 
