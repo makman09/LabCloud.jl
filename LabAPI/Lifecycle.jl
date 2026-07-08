@@ -174,6 +174,7 @@ function mfa_delete(spec::EntitySpec, name, bucket_name, mfa_code)
 
     try
         _delete_existing_keys(username, operator)
+        ignore_not_found(() -> IAM.delete_login_profile(username; aws_config=operator))
         ignore_not_found(() -> IAM.delete_user_policy("s3-bucket-access", username; aws_config=operator))
         ignore_not_found(() -> IAM.remove_user_from_group(spec.group, username; aws_config=operator))
         IAM.delete_user(username; aws_config=operator)
