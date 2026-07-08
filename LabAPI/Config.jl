@@ -53,7 +53,6 @@ struct AppConfig
     nas_research_path::String
     sync_progress_dir::String
     sync_workers::Int
-    bypass_profile::String
 end
 
 const _dotenv_loaded = Ref(false)
@@ -98,13 +97,12 @@ Read the current environment into an `AppConfig` (after backfilling from `.env` 
 `_load_dotenv`). Mirrors `src/config.py` line for line, including the hard requirement:
 `LAB_OPERATOR_ROLE_ARN` must be set (env or `.env`) or this raises.
 
-`bypass_profile` (`AWS_BYPASS_PROFILE`, default `caucellcloud`) is a *local AWS CLI profile
-name*, not a role ARN. `LabOperatorRole` was consolidated (formerly `S3PhiBypassRole` was a
-separate role; see terraform's `iam.tf`), so the MFA-gated bypass-delete path now assumes the
-same `role_arn` above, just via a different trust statement (`BypassDeleteRequiresMfa`,
-restricted to `var.bypass_user_arns` — a human admin identity, not the `lab-operator` service
-user) and with a fresh MFA factor attached to the session. This profile must resolve to one
-of those `bypass_user_arns` and have an MFA device registered.
+There is a single AWS CLI profile (`AWS_PROFILE`, default `caucellcloud-lab-operator`) for
+everything: `LabOperatorRole` was consolidated (formerly `S3PhiBypassRole` was a separate
+role; see terraform's `iam.tf`), and the MFA-gated bypass-delete path now re-assumes that same
+`role_arn` from this SAME `lab-operator` identity — via a different trust statement
+(`BypassDeleteRequiresMfa`) and a fresh MFA factor from lab-operator's own virtual MFA device
+— rather than a separate human admin profile.
 """
 function config()
     _load_dotenv()
@@ -123,7 +121,6 @@ function config()
         get(ENV, "NAS_RESEARCH_PATH", "/Volumes/CaucellVolumeI/Research"),
         get(ENV, "SYNC_PROGRESS_DIR", joinpath(homedir(), ".caucell", "sync_progress")),
         parse(Int, get(ENV, "SYNC_WORKERS", "10")),
-        get(ENV, "AWS_BYPASS_PROFILE", "caucellcloud"),
     )
 end
 
