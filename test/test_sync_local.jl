@@ -70,6 +70,28 @@
         end
     end
 
+    @testset "build_researcher_keyset" begin
+        # Files across managed prefixes map to full keys; root README is included when present.
+        mktempdir() do d
+            mkdir(joinpath(d, "Data")); write(joinpath(d, "Data", "a.txt"), "a")
+            mkdir(joinpath(d, "Result")); mkdir(joinpath(d, "Result", "sub"))
+            write(joinpath(d, "Result", "sub", "b.txt"), "b")
+            write(joinpath(d, "README.md"), "# hi")
+            ks = build_researcher_keyset(d)
+            @test ks == Set(["Data/a.txt", "Result/sub/b.txt", "README.md"])
+        end
+        # No README on NAS → README.md is NOT in the keyset (so it reads as managed, not drift).
+        mktempdir() do d
+            mkdir(joinpath(d, "Data")); write(joinpath(d, "Data", "a.txt"), "a")
+            @test build_researcher_keyset(d) == Set(["Data/a.txt"])
+        end
+        # Directories outside the managed prefixes are ignored.
+        mktempdir() do d
+            mkdir(joinpath(d, "Random")); write(joinpath(d, "Random", "x.txt"), "x")
+            @test isempty(build_researcher_keyset(d))
+        end
+    end
+
     @testset "compute_sync_delta" begin
         t = 1.75e9  # arbitrary epoch base
         local_m(entries...) = Dict{String,LabAPI.Sync.LocalEntry}(

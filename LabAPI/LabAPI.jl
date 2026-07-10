@@ -51,8 +51,9 @@ export EntitySpec, customer_spec, vendor_spec, rotate_key, mfa_delete, _iso
 export _prompt_line, _abort, _require_mfa, _confirm_delete, print_record, run_cli
 export README_NAME, discover_nas_researchers, build_local_manifest,
        build_root_readme_local_manifest, build_s3_manifest, compute_sync_delta,
-       progress_path, load_progress, save_progress, clear_progress
-export upload_data_to_s3
+       progress_path, load_progress, save_progress, clear_progress,
+       build_researcher_keyset, list_bucket_current_keys, compute_bucket_orphans
+export upload_data_to_s3, delete_orphan_objects
 export status_report, render_status
 
 end # module LabAPI

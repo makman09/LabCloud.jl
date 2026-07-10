@@ -195,7 +195,7 @@ function _plan_push(name, nas_path, conn)
     )
 end
 
-function run_push(; dry_run=false, researcher_filter="", nas_path="")
+function run_push(; dry_run=false, researcher_filter="", nas_path="", overwrite=false)
     nas_path = isempty(nas_path) ? config().nas_research_path : nas_path
     researchers = _resolve_researchers(nas_path, researcher_filter)
     if isempty(researchers)
@@ -209,6 +209,37 @@ function run_push(; dry_run=false, researcher_filter="", nas_path="")
     conn = init_db()
     provisioned = String[]; synced = String[]; skipped = String[]; errors = Tuple{String,String}[]
 
+    # Bucket-side drift — S3 keys with no NAS file (the mirror direction plain push ignores).
+    # No-op until the bucket exists. Plain push only warns; `--overwrite` removes (writes delete
+    # markers). Called from every per-researcher exit path so an emptied prefix or a fully-synced
+    # researcher still surfaces/removes orphans.
+    function handle_orphans(name, root, plan)
+        plan.needs_provision && return
+        orphans = try
+            compute_bucket_orphans(assume_lab_operator(), plan.bucket_name, root)
+        catch e
+            msg = e isa AppError ? e.msg : sprint(showerror, e)
+            println("    ERROR checking drift: $msg")
+            push!(errors, (name, msg))
+            return
+        end
+        isempty(orphans) && return
+        if !overwrite
+            println("    note: $(length(orphans)) S3 object(s) not on NAS — run with --overwrite to remove")
+            return
+        end
+        if dry_run
+            println("    [dry-run] would remove $(length(orphans)) orphan object(s) not on NAS:")
+            for k in orphans
+                println("      $k")
+            end
+            return
+        end
+        deleted, failed = delete_orphan_objects(plan.bucket_name, orphans)
+        println("    removed $deleted orphan object(s)" * (failed > 0 ? " ($failed failed)" : ""))
+        failed == 0 || push!(errors, (name, "$failed orphan object(s) failed to remove"))
+    end
+
     for name in researchers
         println("  $name")
         plan = try
@@ -220,8 +251,11 @@ function run_push(; dry_run=false, researcher_filter="", nas_path="")
             continue
         end
 
+        root = joinpath(nas_path, name)
+
         if plan.skip_reason !== nothing
             println("    $(plan.skip_reason) — skipped")
+            handle_orphans(name, root, plan)
             push!(skipped, name)
             continue
         end
@@ -232,6 +266,7 @@ function run_push(; dry_run=false, researcher_filter="", nas_path="")
 
         if plan.delta_count == 0
             println("    already synced ($(plan.local_files) files)")
+            handle_orphans(name, root, plan)
             push!(skipped, name)
             continue
         end
@@ -245,6 +280,7 @@ function run_push(; dry_run=false, researcher_filter="", nas_path="")
             for p in to_upload
                 println("    [dry-run] $verb $(p.delta_count) file(s) ($(fmt_size(p.delta_bytes))) to $(p.label)")
             end
+            handle_orphans(name, root, plan)
             push!(synced, name)
             continue
         end
@@ -266,6 +302,7 @@ function run_push(; dry_run=false, researcher_filter="", nas_path="")
                 total_failed += fail_count
             end
             println("    done ($total_uploaded files uploaded)")
+            handle_orphans(name, root, plan)
             total_failed == 0 && clear_progress(name)
             push!(synced, name)
         catch e
@@ -399,17 +436,36 @@ end
 """
 Discover researchers on NAS, provision missing ones, and sync every populated prefix to S3.
 
+Plain push is upload-only; it now also emits a non-blocking `note:` when a bucket holds
+objects that no longer exist on NAS (one extra whole-bucket list per provisioned researcher).
+`--overwrite` acts on that drift: it mirrors the whole bucket from root, removing any S3 object
+not present on NAS. Removal is a soft delete (a delete marker on the versioned bucket) — the
+current view matches NAS, but prior versions remain in history (no MFA / no version purge). The
+provisioned root `README.md` placeholder is always left in place.
+
 # Options
 
-- `--researcher=<name>`: push only this researcher (TitleCase name).
+- `--researcher=<name>`: push only this researcher (TitleCase name). Required with `--overwrite`.
 - `--nas-path=<path>`: override NAS research path.
 
 # Flags
 
 - `--dry-run`: run the identical plan (real S3 delta) but stop at the write guard.
+- `--overwrite`: remove S3 objects not present on NAS (requires `--researcher`; prompts for
+  confirmation unless `--yes`). With `--dry-run`, previews the removals without deleting.
+- `--yes`: skip the `--overwrite` confirmation prompt (non-interactive use).
 """
-@cast function push(; dry_run::Bool=false, researcher::String="", nas_path::String="")
-    run_push(; dry_run=dry_run, researcher_filter=researcher, nas_path=nas_path)
+@cast function push(; dry_run::Bool=false, researcher::String="", nas_path::String="",
+                    overwrite::Bool=false, yes::Bool=false)
+    if overwrite && isempty(researcher)
+        throw(AppError("--overwrite requires --researcher"))
+    end
+    if overwrite && !dry_run
+        _confirm_delete(yes; message="--overwrite will remove every S3 object not present on NAS " *
+            "for '$researcher' (writes delete markers; current view only, not a version erase). " *
+            "Continue? [y/N]: ")
+    end
+    run_push(; dry_run=dry_run, researcher_filter=researcher, nas_path=nas_path, overwrite=overwrite)
 end
 
 """

@@ -38,7 +38,7 @@ using AWS.AWSServices: s3 as s3_raw
 
 const S3 = AWSIdent.S3
 
-export upload_data_to_s3
+export upload_data_to_s3, delete_orphan_objects
 
 """
     _upload_multipart(cfg, bucket_name, local_file, s3_key)
@@ -193,6 +193,34 @@ function upload_data_to_s3(bucket_name, data_dir, files_to_upload, researcher_na
         println("    $(length(failed)) file(s) failed to upload")
     end
     return length(already_uploaded), length(failed)
+end
+
+"""
+    delete_orphan_objects(bucket_name, orphan_keys) -> (deleted, failed)
+
+The mirror direction of `upload_data_to_s3`: remove S3 keys that no longer exist on NAS
+(computed by `Sync.compute_bucket_orphans`). A plain `S3.delete_object` on a versioned
+bucket writes a delete marker — this hides the current object without purging version
+history (a true erase would need the MFA/governance-bypass path in `Lifecycle`). Runs on the
+routine `assume_lab_operator()` session (`s3:DeleteObject` on `research-*/*` needs no MFA).
+Collects per-object failures and never raises, mirroring the upload half.
+"""
+function delete_orphan_objects(bucket_name, orphan_keys)
+    isempty(orphan_keys) && return 0, 0
+    cfg = assume_lab_operator()
+    deleted = 0
+    failed = 0
+    for key in orphan_keys
+        try
+            S3.delete_object(bucket_name, key; aws_config=cfg)
+            deleted += 1
+            println("    removed $(key)")
+        catch e
+            failed += 1
+            println("    FAILED to remove $(key): $(sprint(showerror, e))")
+        end
+    end
+    return deleted, failed
 end
 
 end # module Upload

@@ -20,7 +20,7 @@ module Sync
 using Dates: datetime2unix
 using JSON3
 
-using ..Config: EXCLUDED_NAS_DIRS, config
+using ..Config: EXCLUDED_NAS_DIRS, PREFIXES, config
 using ..Util: AppError, NAME_PATTERN, as_vector, _parse_iso8601
 using ..AWSIdent: AWSIdent
 
@@ -28,7 +28,8 @@ const S3 = AWSIdent.S3
 
 export README_NAME, discover_nas_researchers, build_local_manifest,
        build_root_readme_local_manifest, build_s3_manifest, compute_sync_delta,
-       progress_path, load_progress, save_progress, clear_progress
+       progress_path, load_progress, save_progress, clear_progress,
+       build_researcher_keyset, list_bucket_current_keys, compute_bucket_orphans
 
 # The researcher-root README.md syncs to the bucket-root `README.md` key (no prefix).
 const README_NAME = "README.md"
@@ -151,6 +152,54 @@ function compute_sync_delta(local_manifest, s3_manifest, s3_prefix="Data/")
         end
     end
     return to_upload
+end
+
+# ---------------------------------------------------------------------------------------
+# Bucket-side drift — the mirror direction `compute_sync_delta` deliberately ignores. These
+# power the plain-push drift warning and the `push --overwrite` orphan removal: whole-bucket
+# listing minus the keys NAS would legitimately produce.
+# ---------------------------------------------------------------------------------------
+
+"""
+    build_researcher_keyset(researcher_root) -> Set{String}
+
+Every S3 object key a push would legitimately produce for one researcher: each managed
+prefix's local files (as `"\$prefix\$rel"`) plus the root `README.md` when present on NAS.
+This is `Status.jl`'s `local_keys` set-difference operand lifted to cover the whole
+researcher — the reference set `compute_bucket_orphans` subtracts the live listing against.
+"""
+function build_researcher_keyset(researcher_root)
+    keyset = Set{String}()
+    for prefix in PREFIXES
+        sub_dir = joinpath(researcher_root, rstrip(prefix, '/'))
+        for rel in keys(build_local_manifest(sub_dir))
+            push!(keyset, "$(prefix)$(rel)")
+        end
+    end
+    isempty(build_root_readme_local_manifest(researcher_root)) || push!(keyset, README_NAME)
+    return keyset
+end
+
+"""
+    list_bucket_current_keys(cfg, bucket_name) -> Vector{String}
+
+Every current-version object key in the whole bucket (empty prefix), with "directory"
+placeholder keys (ending `/`) already dropped — reuses `build_s3_manifest`'s pagination and
+placeholder-skip under an empty prefix. The current-view counterpart used for drift detection.
+"""
+list_bucket_current_keys(cfg, bucket_name) = collect(keys(build_s3_manifest(cfg, bucket_name, "")))
+
+"""
+    compute_bucket_orphans(cfg, bucket_name, researcher_root) -> Vector{String}
+
+Bucket-side drift: current S3 keys with no corresponding NAS file. The provisioned root
+`README.md` placeholder is always treated as managed state (never an orphan), matching the
+`Status.jl:88` guard, so neither the drift warning nor `--overwrite` disturbs it.
+"""
+function compute_bucket_orphans(cfg, bucket_name, researcher_root)
+    keyset = build_researcher_keyset(researcher_root)
+    return [k for k in list_bucket_current_keys(cfg, bucket_name)
+            if k != README_NAME && !(k in keyset)]
 end
 
 # ---------------------------------------------------------------------------------------
