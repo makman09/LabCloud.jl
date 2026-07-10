@@ -5,9 +5,11 @@ The shared IAM-user + registry-row lifecycle (`EntitySpec`, `rotate_key`, `mfa_d
 used by both the customer and vendor CLIs. Python inlined these bodies into
 `LabCustomersAPI.py`/`LabVendorAPI.py` when it deleted `src/lifecycle.py`; the Julia port
 deliberately keeps the parameterized form — the rotate/delete mechanics are still
-near-identical between customers and vendors (username prefix, group, table/column names,
-and the vendor's `vendor_orders` child purge are the only deltas), and the contract suite
-asserts external behavior, not module structure.
+near-identical between customers and vendors (group, table/column names, and the vendor's
+`vendor_orders` child purge are the only deltas), and the contract suite asserts external
+behavior, not module structure. The IAM username is no longer reconstructed from a fixed
+prefix; callers pass it in, derived from the entity's stored ARN via `username_from_arn`, so a
+single path serves legacy `LabCustomer-` users, new bare path users, and vendors alike.
 """
 module Lifecycle
 
@@ -27,13 +29,13 @@ export EntitySpec, customer_spec, vendor_spec, rotate_key, mfa_delete, _iso
     EntitySpec
 
 Parameterizes the shared rotate/delete mechanics over what differs between the customer and
-vendor CLIs: the IAM username prefix, the IAM group to remove from on delete, the registry
-table + name column, and (for vendors) extra child tables to purge first (FK order). Mirrors
-`src/lifecycle.py::EntitySpec`.
+vendor CLIs: the IAM group to remove from on delete, the registry table + name column, and
+(for vendors) extra child tables to purge first (FK order). The IAM username is NOT part of the
+spec — it varies per row (legacy prefix vs new path), so callers derive it from the stored ARN
+and pass it into `rotate_key`/`mfa_delete`.
 """
 struct EntitySpec
     kind::String            # human label, e.g. "Customer" / "Vendor"
-    user_prefix::String      # IAM username prefix, e.g. "LabCustomer-" / "LabVendor-"
     group::String            # IAM group to remove from on delete
     table::String            # registry table, e.g. "customers" / "vendors"
     name_col::String         # name column, e.g. "customer_name" / "vendor_name"
@@ -41,8 +43,8 @@ struct EntitySpec
     child_tables::Tuple      # extra tables to purge on delete (FK children)
 end
 
-EntitySpec(kind, user_prefix, group, table, name_col, init_db) =
-    EntitySpec(kind, user_prefix, group, table, name_col, init_db, ())
+EntitySpec(kind, group, table, name_col, init_db) =
+    EntitySpec(kind, group, table, name_col, init_db, ())
 
 """
     customer_spec() -> EntitySpec
@@ -53,7 +55,7 @@ freeze whichever `LAB_CUSTOMERS_GROUP` happened to be set at sysimage-build time
 later invocation, and would also make plain offline commands like `list`/`get` needlessly
 require `LAB_OPERATOR_ROLE_ARN` just to load the module).
 """
-customer_spec() = EntitySpec("Customer", "LabCustomer-", config().lab_group, "customers", "customer_name", init_db)
+customer_spec() = EntitySpec("Customer", config().lab_group, "customers", "customer_name", init_db)
 
 """
     vendor_spec() -> EntitySpec
@@ -62,7 +64,7 @@ Vendor counterpart of `customer_spec()`. Built fresh per call for the same `conf
 reason. `vendor_orders` is a FK child of `vendors`, so it's purged first on delete. Mirrors
 `LabVendorAPI.py::VENDOR_SPEC`.
 """
-vendor_spec() = EntitySpec("Vendor", "LabVendor-", config().vendor_group, "vendors", "vendor_name",
+vendor_spec() = EntitySpec("Vendor", config().vendor_group, "vendors", "vendor_name",
                            init_vendors_db, ("vendor_orders",))
 
 _iso_now() = Dates.format(Dates.now(Dates.UTC), dateformat"yyyy-mm-ddTHH:MM:SS.sss") * "+00:00"
@@ -88,15 +90,14 @@ function _delete_existing_keys(username, cfg)
 end
 
 """
-    rotate_key(spec, name, bucket_name) -> String
+    rotate_key(spec, name, bucket_name, username) -> String
 
 Deletes the entity's existing access key(s), mints a fresh one, and updates its registry row
 (`access_key_id`, `key_created`, `rotation_due`). Returns the new access key ID. Uses the
-lab-operator role. Mirrors the (now inlined) `rotate_credentials`/`rotate_vendor_credentials`
-bodies in the Python CLIs.
+lab-operator role. `username` is the IAM username (from the caller's `username_from_arn`);
+`name` remains the registry key.
 """
-function rotate_key(spec::EntitySpec, name, bucket_name)
-    username = "$(spec.user_prefix)$name"
+function rotate_key(spec::EntitySpec, name, bucket_name, username)
     cfg = AWSIdent.assume_lab_operator()
 
     _delete_existing_keys(username, cfg)
@@ -155,7 +156,7 @@ function _delete_object_versions(bucket_name, bypass_cfg)
 end
 
 """
-    mfa_delete(spec, name, bucket_name, mfa_code) -> (deleted, bucket)
+    mfa_delete(spec, name, bucket_name, mfa_code, username) -> (deleted, bucket)
 
 MFA-gated teardown: delete the IAM user, empty the versioned bucket under governance bypass,
 delete the bucket, and purge the registry row(s). Idempotent against partially-gone state (a
@@ -163,10 +164,9 @@ missing IAM user or bucket is logged and skipped). IAM/bucket teardown runs as t
 operator; ONLY the version wipe uses the MFA-gated bypass session (`LabOperatorRole` assumed
 by the human admin identity with a fresh MFA factor — see `AWSIdent.assume_bypass_role`).
 Mirrors the (now inlined) `delete_customer`/`delete_vendor` bodies in the Python CLIs.
+`username` is the IAM username (from the caller's `username_from_arn`); `name` keys the registry.
 """
-function mfa_delete(spec::EntitySpec, name, bucket_name, mfa_code)
-    username = "$(spec.user_prefix)$name"
-
+function mfa_delete(spec::EntitySpec, name, bucket_name, mfa_code, username)
     bypass = AWSIdent.assume_bypass_role(mfa_code)
     println("  MFA verified")
 

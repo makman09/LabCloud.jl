@@ -12,7 +12,8 @@ using Dates: DateTime
 
 export AppError, NAME_PATTERN, VENDOR_NAME_PATTERN,
        validate_customer_name, validate_vendor_name,
-       print_secret, fmt_size, ignore_not_found, as_vector, _parse_iso8601
+       print_secret, fmt_size, ignore_not_found, as_vector, _parse_iso8601,
+       username_from_arn
 
 """
     AppError <: Exception
@@ -99,6 +100,20 @@ responses) and `Lifecycle` (IAM + S3 responses) — this is a generic AWS.jl qui
 specific to either.
 """
 as_vector(x) = x isa AbstractVector ? x : [x]
+
+"""
+    username_from_arn(arn) -> String
+
+The IAM username is the last `/`-delimited segment of the user ARN — the single source of
+truth for what every name-based IAM call (`list_access_keys`, `create_access_key`,
+`delete_user`, …) needs. Deriving it from the stored ARN (rather than reconstructing it from
+a fixed prefix) is what lets one code path serve every naming scheme at once:
+
+- new customer `…:user/lab-customers/JohnSmith`  -> `JohnSmith` (bare; path is not part of the username)
+- legacy customer `…:user/LabCustomer-JohnSmith` -> `LabCustomer-JohnSmith`
+- vendor `…:user/LabVendor-genewiz`              -> `LabVendor-genewiz`
+"""
+username_from_arn(arn) = String(last(split(arn, '/')))
 
 """
     _parse_iso8601(s) -> DateTime

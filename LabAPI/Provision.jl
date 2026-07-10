@@ -48,6 +48,15 @@ export configure_bucket, create_prefix_structure, put_lab_customer_s3_policy,
 
 const S3_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/"
 
+# New lab-customer IAM users are created under this path so their ARN carries a stable
+# discriminator (`…:user/lab-customers/{name}`) while the username stays bare `{name}`. This
+# is what scopes `LabOperatorRole` (terraform `iam_policies.tf`, Resource `user/lab-customers/*`)
+# and drives QuickSight attribution (`quicksight.tf`, on `principal_arn`) now that the name no
+# longer carries the old `LabCustomer-` prefix. COUPLED to that terraform literal — there is no
+# shared source of truth, so change both together. Legacy `LabCustomer-` users (no path) are
+# untouched; usernames are always derived from the stored ARN via `username_from_arn`.
+const LAB_CUSTOMER_PATH = "/lab-customers/"
+
 _already_exists(e) = e isa AWS.AWSExceptions.AWSException &&
                      e.code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists")
 
@@ -159,25 +168,28 @@ end
 """
     create_lab_iam_user(cfg, customer_name, bucket_name, account_id) -> (user_arn, access_key_id, secret_key)
 
-Creates `LabCustomer-{customer_name}` (idempotent against `EntityAlreadyExists`, mirroring
-the Python `except ClientError` fallback to the deterministic ARN), attaches the scoped
-`s3-bucket-access` inline policy via `put_lab_customer_s3_policy`, adds it to
-`LAB_CUSTOMERS_GROUP`, and mints an access key. Mirrors
-`src/provision.py::create_lab_iam_user`.
+Creates the bare-named IAM user `{customer_name}` under the `LAB_CUSTOMER_PATH` path (so its
+ARN is `…:user/lab-customers/{customer_name}`; idempotent against `EntityAlreadyExists`,
+falling back to that deterministic path-inclusive ARN), attaches the scoped `s3-bucket-access`
+inline policy via `put_lab_customer_s3_policy`, adds it to `LAB_CUSTOMERS_GROUP`, and mints an
+access key. The path — not a name prefix — is what carries the customer discriminator now;
+retroactive users keep their legacy `LabCustomer-` names.
 """
 function create_lab_iam_user(cfg, customer_name, bucket_name, account_id)
-    username = "LabCustomer-$customer_name"
+    username = customer_name
 
     user_arn = try
-        resp = AWSIdent.IAM.create_user(username, Dict{String,Any}("Tags" => [
-            Dict("Key" => "Purpose", "Value" => "research"),
-            Dict("Key" => "DataClass", "Value" => "PHI"),
-            Dict("Key" => "LabName", "Value" => customer_name),
-        ]); aws_config=cfg)
+        resp = AWSIdent.IAM.create_user(username, Dict{String,Any}(
+            "Path" => LAB_CUSTOMER_PATH,
+            "Tags" => [
+                Dict("Key" => "Purpose", "Value" => "research"),
+                Dict("Key" => "DataClass", "Value" => "PHI"),
+                Dict("Key" => "LabName", "Value" => customer_name),
+            ]); aws_config=cfg)
         resp["CreateUserResult"]["User"]["Arn"]
     catch e
         if e isa AWS.AWSExceptions.AWSException && e.code == "EntityAlreadyExists"
-            "arn:aws:iam::$account_id:user/$username"
+            "arn:aws:iam::$account_id:user/lab-customers/$username"
         else
             rethrow()
         end

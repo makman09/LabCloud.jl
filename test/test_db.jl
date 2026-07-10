@@ -93,4 +93,52 @@ end
             end
         end
     end
+
+    @testset "path-based iam_user_arn accepted (new bare username under /lab-customers/)" begin
+        withdb() do
+            db = init_db()
+            @test !threw(() -> ins_customer(db, (
+                customer_name = "JaneDoe",
+                iam_user_arn  = "arn:aws:iam::123456789012:user/lab-customers/JaneDoe",
+                bucket_name   = "research-janedoe",
+                s3_prefix     = "research-janedoe/")))
+            close(db)
+        end
+    end
+
+    @testset "init_db migrates a pre-path DB to the relaxed CHECK" begin
+        # A DB created before path usernames has the original single-LIKE CHECK that only
+        # accepts LabCustomer-%. init_db() must detect the stale DDL and rebuild in place,
+        # preserving existing rows, so new path-ARN inserts stop failing.
+        old_ddl = raw"""
+            CREATE TABLE customers (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_name TEXT NOT NULL UNIQUE CHECK(length(customer_name) >= 4 AND customer_name GLOB '[A-Z][a-z]*[A-Z][a-z]*'),
+                iam_user_arn  TEXT NOT NULL CHECK(iam_user_arn LIKE 'arn:aws:iam::%:user/LabCustomer-%'),
+                access_key_id TEXT NOT NULL CHECK(length(access_key_id) = 20 AND access_key_id GLOB '[A-Z]*'),
+                bucket_name   TEXT NOT NULL CHECK(bucket_name LIKE 'research-%'),
+                s3_prefix     TEXT NOT NULL CHECK(s3_prefix LIKE 'research-%/'),
+                key_created   TEXT NOT NULL CHECK(key_created LIKE '____-__-__T%'),
+                rotation_due  TEXT NOT NULL CHECK(rotation_due LIKE '____-__-__T%'),
+                status        TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'rotating', 'suspended'))
+            )
+        """
+        withdb() do
+            seed = SQLite.DB(ENV["DB_PATH"])
+            SQLite.execute(seed, old_ddl)
+            ins_customer(seed)  # legacy LabCustomer- row, valid under the old CHECK
+            close(seed)
+
+            db = init_db()  # triggers _migrate_customers_check
+            legacy = [NamedTuple(r) for r in
+                      SQLite.DBInterface.execute(db, "SELECT * FROM customers WHERE customer_name='JohnSmith'")]
+            @test length(legacy) == 1  # existing row survived the rebuild
+            @test !threw(() -> ins_customer(db, (  # path ARN the old CHECK rejected now inserts
+                customer_name = "JaneDoe",
+                iam_user_arn  = "arn:aws:iam::123456789012:user/lab-customers/JaneDoe",
+                bucket_name   = "research-janedoe",
+                s3_prefix     = "research-janedoe/")))
+            close(db)
+        end
+    end
 end

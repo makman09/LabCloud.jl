@@ -77,7 +77,7 @@ Mirrors `LabCustomersAPI.py::rotate_credentials`.
 """
 function rotate_credentials(name)
     c = get_customer(name)
-    rotate_key(customer_spec(), name, c.bucket_name)
+    rotate_key(customer_spec(), name, c.bucket_name, username_from_arn(c.iam_user_arn))
 end
 
 """
@@ -87,7 +87,7 @@ Mirrors `LabCustomersAPI.py::delete_customer`.
 """
 function delete_customer(name, mfa_code)
     c = get_customer(name)
-    mfa_delete(customer_spec(), name, c.bucket_name, mfa_code)
+    mfa_delete(customer_spec(), name, c.bucket_name, mfa_code, username_from_arn(c.iam_user_arn))
 end
 
 # `delete`'s interactive gates (`_require_mfa`/`_confirm_delete`) and the `AppError` exit
@@ -358,7 +358,7 @@ Re-apply bucket hardening and the researcher's IAM policy to an existing custome
     cfg = assume_lab_operator()
     kms_key_arn = resolve_kms_key_arn(cfg)
     configure_bucket(cfg, bucket_name, kms_key_arn)
-    put_lab_customer_s3_policy(cfg, "LabCustomer-$name", bucket_name)
+    put_lab_customer_s3_policy(cfg, username_from_arn(c.iam_user_arn), bucket_name)
     println("Policy settings migrated for '$name' on bucket '$bucket_name'.")
 end
 

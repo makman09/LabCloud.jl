@@ -87,7 +87,7 @@ Mirrors `LabVendorAPI.py::rotate_vendor_credentials`.
 """
 function rotate_vendor_credentials(name)
     v = get_vendor(name)
-    rotate_key(vendor_spec(), name, v.bucket_name)
+    rotate_key(vendor_spec(), name, v.bucket_name, username_from_arn(v.iam_user_arn))
 end
 
 """
@@ -120,7 +120,7 @@ Mirrors `LabVendorAPI.py::delete_vendor`.
 """
 function delete_vendor(name, mfa_code)
     v = get_vendor(name)
-    mfa_delete(vendor_spec(), name, v.bucket_name, mfa_code)
+    mfa_delete(vendor_spec(), name, v.bucket_name, mfa_code, username_from_arn(v.iam_user_arn))
 end
 
 # `delete`'s interactive gates (`_require_mfa`/`_confirm_delete`) and the `AppError` exit

@@ -39,6 +39,15 @@
         @test as_vector(5) == [5]
     end
 
+    @testset "username_from_arn (bare last segment)" begin
+        # new customer: bare username under the /lab-customers/ path
+        @test username_from_arn("arn:aws:iam::123456789012:user/lab-customers/JohnSmith") == "JohnSmith"
+        # legacy customer: name carries the prefix, no path
+        @test username_from_arn("arn:aws:iam::123456789012:user/LabCustomer-JohnSmith") == "LabCustomer-JohnSmith"
+        # vendor: unchanged
+        @test username_from_arn("arn:aws:iam::123456789012:user/LabVendor-genewiz") == "LabVendor-genewiz"
+    end
+
     @testset "print_secret prints key + banner" begin
         # redirect_stdout needs a real OS stream, not an in-memory IOBuffer — capture via a temp file.
         out = mktemp() do path, io

@@ -13,7 +13,7 @@ using SQLite
 
 using ..Config: config
 using ..DB: init_db
-using ..Util: AppError, fmt_size, validate_customer_name
+using ..Util: AppError, fmt_size, validate_customer_name, username_from_arn
 using ..AWSIdent: AWSIdent, assume_lab_operator, _error_code
 using ..Sync: Sync, README_NAME, discover_nas_researchers, build_local_manifest,
               build_root_readme_local_manifest, build_s3_manifest, compute_sync_delta
@@ -47,12 +47,13 @@ function probe_bucket_exists(s3, bucket_name)
 end
 
 """
-True if `LabCustomer-{name}` exists. Uses `list_access_keys` (already granted to the
-provisioner) rather than `get_user`, so no extra `iam:GetUser` grant is needed.
+True if the IAM user `username` exists. Uses `list_access_keys` (already granted to the
+provisioner) rather than `get_user`, so no extra `iam:GetUser` grant is needed. The caller
+resolves `username` from the registry ARN (legacy `LabCustomer-{name}` or new bare `{name}`).
 """
-function probe_iam_user_exists(iam_prov, name)
+function probe_iam_user_exists(iam_prov, username)
     try
-        IAM.list_access_keys(Dict("UserName" => "LabCustomer-$name"); aws_config=iam_prov)
+        IAM.list_access_keys(Dict("UserName" => username); aws_config=iam_prov)
         return true
     catch e
         occursin("NoSuchEntity", sprint(showerror, e)) && return false
@@ -102,8 +103,10 @@ function reconcile_bucket(s3_phi, bucket_name, role, name, nas_root)
     return results
 end
 
-"""Per-researcher block: IAM user + each per-researcher bucket's existence/reconcile."""
-function reconcile_researcher(name, in_db, nas_root, iam_prov, s3_phi)
+"""Per-researcher block: IAM user + each per-researcher bucket's existence/reconcile. `arn`
+is the registry `iam_user_arn` (or "" for NAS-only names with no DB row); the IAM username to
+probe is derived from it, falling back to the bare `name` a future provision would use."""
+function reconcile_researcher(name, in_db, arn, nas_root, iam_prov, s3_phi)
     buckets = Dict{String,Any}()
     for role in BUCKET_ROLES
         bucket_name = "$role-$(lowercase(name))"
@@ -114,11 +117,13 @@ function reconcile_researcher(name, in_db, nas_root, iam_prov, s3_phi)
                              prefixes=reconcile_bucket(s3_phi, bucket_name, role, name, nas_root))
         end
     end
+    iam_username = isempty(arn) ? name : username_from_arn(arn)
     return (
         name = name,
         in_db = in_db,
         nas_present = isdir(joinpath(nas_root, name)),
-        iam_user = probe_iam_user_exists(iam_prov, name),
+        iam_username = iam_username,
+        iam_user = probe_iam_user_exists(iam_prov, iam_username),
         buckets = buckets,
     )
 end
@@ -134,9 +139,10 @@ function status_report(; researcher_filter="", nas_path="")
     nas_path = isempty(nas_path) ? config().nas_research_path : nas_path
 
     conn = init_db()
-    db_names = Set(row.customer_name for row in
-                   SQLite.DBInterface.execute(conn, "SELECT customer_name FROM customers"))
+    db_arns = Dict(row.customer_name => row.iam_user_arn for row in
+                   SQLite.DBInterface.execute(conn, "SELECT customer_name, iam_user_arn FROM customers"))
     close(conn)
+    db_names = Set(keys(db_arns))
 
     if !isempty(researcher_filter)
         validate_customer_name(researcher_filter)
@@ -159,7 +165,8 @@ function status_report(; researcher_filter="", nas_path="")
         # mirroring of src/status.py.
         operator = assume_lab_operator()
         for name in targets
-            push!(researchers, reconcile_researcher(name, name in db_names, nas_path, operator, operator))
+            push!(researchers, reconcile_researcher(name, name in db_names,
+                                                    get(db_arns, name, ""), nas_path, operator, operator))
         end
     end
 
@@ -225,7 +232,7 @@ function render_status(report)
             end
         end
 
-        println("  iam LabCustomer-$(rpad(r.name, 22)) $(r.iam_user ? "present" : "MISSING")")
+        println("  iam $(rpad(r.iam_username, 34)) $(r.iam_user ? "present" : "MISSING")")
         println()
     end
 

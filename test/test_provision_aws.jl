@@ -35,13 +35,13 @@ _unescapeuri(s) = replace(String(s), r"%[0-9A-Fa-f]{2}" => m -> string(Char(pars
         catch  # group may already exist on a warm LocalStack
         end
         arn, key_id, secret = create_lab_iam_user(cfg, "UnitUser$sfx", bucket, "000000000000")
-        @test occursin("LabCustomer-UnitUser$sfx", arn)
+        @test occursin("user/lab-customers/UnitUser$sfx", arn)
         @test length(key_id) == 20
         @test !isempty(secret)
     end
 
     @testset "put_lab_customer_s3_policy is independently re-appliable" begin
-        username = "LabCustomer-UnitUser$sfx"
+        username = "UnitUser$sfx"
         # Drift: remove the policy created above, re-apply standalone (the
         # migrate-policy-settings path), and re-apply again (idempotence).
         LabAPI.AWSIdent.IAM.delete_user_policy("s3-bucket-access", username; aws_config = cfg)
