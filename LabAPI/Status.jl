@@ -112,8 +112,7 @@ function reconcile_bucket(s3_phi, bucket_name, role, name, nas_root; participant
 end
 
 """Per-researcher block: IAM user + each per-researcher bucket's existence/reconcile. `arn`
-is the registry `iam_user_arn` (or "" for NAS-only names with no DB row); the IAM username to
-probe is derived from it, falling back to the bare `name` a future provision would use."""
+is the registry `iam_user_arn` (or "" for NAS-only names with no DB row)."""
 function reconcile_researcher(name, in_db, arn, nas_root, iam_prov, s3_phi; participants=false)
     buckets = Dict{String,Any}()
     for role in BUCKET_ROLES
@@ -126,13 +125,19 @@ function reconcile_researcher(name, in_db, arn, nas_root, iam_prov, s3_phi; part
                                                        participants=participants))
         end
     end
+    # A name with no DB row hasn't been provisioned, so it has no IAM user to probe. Skip the
+    # probe rather than guess a bare username: the operator policy scopes iam:ListAccessKeys to
+    # the provisioned IAM path, so probing an off-path guessed username returns AccessDenied
+    # (not NoSuchEntity) and would abort the whole reconcile — this is the common case in
+    # `--participants` mode, where freshly-discovered participants are all un-provisioned.
     iam_username = isempty(arn) ? name : username_from_arn(arn)
+    iam_user = isempty(arn) ? false : probe_iam_user_exists(iam_prov, iam_username)
     return (
         name = name,
         in_db = in_db,
         nas_present = isdir(joinpath(nas_root, name)),
         iam_username = iam_username,
-        iam_user = probe_iam_user_exists(iam_prov, iam_username),
+        iam_user = iam_user,
         buckets = buckets,
     )
 end
