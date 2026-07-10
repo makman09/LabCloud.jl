@@ -18,7 +18,7 @@ using SQLite
 using ..Config: config, ROTATION_DAYS
 using ..DB: init_db, init_vendors_db
 using ..AWSIdent: AWSIdent, _error_code
-using ..Util: AppError, as_vector, ignore_not_found, print_secret
+using ..Util: AppError, as_vector, xml_children, xml_scalar, ignore_not_found, print_secret
 
 const IAM = AWSIdent.IAM
 const S3 = AWSIdent.S3
@@ -125,14 +125,18 @@ function _purge_rows(spec::EntitySpec, name)
 end
 
 """
-    _delete_object_versions(bucket_name, bypass_cfg)
+    _delete_object_versions(bucket_name, bypass_cfg) -> Int
 
 Paginates `s3:ListObjectVersions` and bypass-deletes every version and delete marker
-(`x-amz-bypass-governance-retention`). AWS.jl's XML wire names for the list elements are
-`Version`/`DeleteMarker` (singular — NOT boto3's `Versions`/`DeleteMarkers`).
+(`x-amz-bypass-governance-retention`), returning the count removed. The wire element names are
+`Version`/`DeleteMarker` (singular — NOT boto3's `Versions`/`DeleteMarkers`), read via
+`xml_children`: `ListVersionsResult` parses into XMLDict's ordered-fallback shape (all children
+under a single `""` key), so a plain `page["Version"]` read silently returns nothing and the purge
+becomes a no-op — the bug that let a non-empty versioned bucket reach `delete_bucket`.
 """
 function _delete_object_versions(bucket_name, bypass_cfg)
     key_marker, version_id_marker = "", ""
+    removed = 0
     while true
         params = Dict{String,Any}()
         isempty(key_marker) || (params["key-marker"] = key_marker)
@@ -140,19 +144,19 @@ function _delete_object_versions(bucket_name, bypass_cfg)
         page = isempty(params) ? S3.list_object_versions(bucket_name; aws_config=bypass_cfg) :
                                   S3.list_object_versions(bucket_name, params; aws_config=bypass_cfg)
 
-        versions = haskey(page, "Version") ? as_vector(page["Version"]) : []
-        markers = haskey(page, "DeleteMarker") ? as_vector(page["DeleteMarker"]) : []
-        for v in vcat(versions, markers)
+        for v in vcat(xml_children(page, "Version"), xml_children(page, "DeleteMarker"))
             S3.delete_object(bucket_name, v["Key"],
                 Dict("versionId" => v["VersionId"],
                      "headers" => Dict("x-amz-bypass-governance-retention" => "true"));
                 aws_config=bypass_cfg)
+            removed += 1
         end
 
-        get(page, "IsTruncated", "false") == "true" || break
-        key_marker = get(page, "NextKeyMarker", "")
-        version_id_marker = get(page, "NextVersionIdMarker", "")
+        xml_scalar(page, "IsTruncated", "false") == "true" || break
+        key_marker = xml_scalar(page, "NextKeyMarker", "")
+        version_id_marker = xml_scalar(page, "NextVersionIdMarker", "")
     end
+    return removed
 end
 
 """
@@ -164,11 +168,15 @@ while any multipart upload is in flight — these aren't listed by `ListObjectVe
 removed by deleting objects. Large-file pushes (>`MULTIPART_THRESHOLD`) that were interrupted
 leave them behind; the `abort-incomplete-multipart-uploads` lifecycle rule only reclaims them
 asynchronously (after `multipart_abort_days`), so a synchronous teardown must abort them itself.
-AWS.jl's XML wire name for the list element is `Upload` (singular). Runs on the MFA `bypass`
-session — `s3:ListBucketMultipartUploads`/`s3:AbortMultipartUpload` are MFA-gated on the role.
+The wire element name is `Upload` (singular), read via `xml_children` because
+`ListMultipartUploadsResult` parses into XMLDict's ordered-fallback shape just like
+`ListVersionsResult` (all children under a single `""` key). Runs on the MFA `bypass` session —
+`s3:ListBucketMultipartUploads`/`s3:AbortMultipartUpload` are MFA-gated on the role. Returns the
+count aborted.
 """
 function _abort_incomplete_multipart_uploads(bucket_name, bypass_cfg)
     key_marker, upload_id_marker = "", ""
+    aborted = 0
     while true
         params = Dict{String,Any}()
         isempty(key_marker) || (params["key-marker"] = key_marker)
@@ -176,15 +184,31 @@ function _abort_incomplete_multipart_uploads(bucket_name, bypass_cfg)
         page = isempty(params) ? S3.list_multipart_uploads(bucket_name; aws_config=bypass_cfg) :
                                   S3.list_multipart_uploads(bucket_name, params; aws_config=bypass_cfg)
 
-        uploads = haskey(page, "Upload") ? as_vector(page["Upload"]) : []
-        for u in uploads
+        for u in xml_children(page, "Upload")
             S3.abort_multipart_upload(bucket_name, u["Key"], u["UploadId"]; aws_config=bypass_cfg)
+            aborted += 1
         end
 
-        get(page, "IsTruncated", "false") == "true" || break
-        key_marker = get(page, "NextKeyMarker", "")
-        upload_id_marker = get(page, "NextUploadIdMarker", "")
+        xml_scalar(page, "IsTruncated", "false") == "true" || break
+        key_marker = xml_scalar(page, "NextKeyMarker", "")
+        upload_id_marker = xml_scalar(page, "NextUploadIdMarker", "")
     end
+    return aborted
+end
+
+"""
+    _count_bucket_residual(bucket_name, bypass_cfg) -> Int
+
+Read-only count of everything that would still block `delete_bucket`: object versions + delete
+markers (first page of `list_object_versions`) plus in-flight multipart uploads (first page of
+`list_multipart_uploads`). A post-purge invariant check — one non-truncated page suffices because
+a correct purge leaves nothing; a nonzero result means the purge silently under-listed.
+"""
+function _count_bucket_residual(bucket_name, bypass_cfg)
+    vpage = S3.list_object_versions(bucket_name; aws_config=bypass_cfg)
+    n = length(xml_children(vpage, "Version")) + length(xml_children(vpage, "DeleteMarker"))
+    upage = S3.list_multipart_uploads(bucket_name; aws_config=bypass_cfg)
+    return n + length(xml_children(upage, "Upload"))
 end
 
 """
@@ -237,6 +261,15 @@ function mfa_delete(spec::EntitySpec, name, bucket_name, mfa_code, username)
     # delete_bucket, or it fails with BucketNotEmpty.
     _delete_object_versions(bucket_name, bypass)
     _abort_incomplete_multipart_uploads(bucket_name, bypass)
+
+    # Safety net against a silent listing regression (the class of bug that let a fully-populated
+    # bucket reach delete_bucket): read-only re-list and refuse to proceed if anything survived, so
+    # we never delete the IAM user and then wedge on delete_bucket with a half-deleted customer.
+    residual = _count_bucket_residual(bucket_name, bypass)
+    residual == 0 || throw(AppError(
+        "Bucket '$bucket_name' still held $residual object version(s)/marker(s)/multipart upload(s) " *
+        "after the purge — aborting before delete_bucket to avoid a partial teardown. " *
+        "Re-run `delete $name` to retry."))
 
     try
         S3.delete_bucket_policy(bucket_name; aws_config=operator)

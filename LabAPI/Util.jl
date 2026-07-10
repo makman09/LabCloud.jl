@@ -12,8 +12,8 @@ using Dates: DateTime
 
 export AppError, NAME_PATTERN, VENDOR_NAME_PATTERN,
        validate_customer_name, validate_vendor_name,
-       print_secret, fmt_size, ignore_not_found, as_vector, _parse_iso8601,
-       username_from_arn
+       print_secret, fmt_size, ignore_not_found, as_vector, xml_children, xml_scalar,
+       _parse_iso8601, username_from_arn
 
 """
     AppError <: Exception
@@ -100,6 +100,38 @@ responses) and `Lifecycle` (IAM + S3 responses) — this is a generic AWS.jl qui
 specific to either.
 """
 as_vector(x) = x isa AbstractVector ? x : [x]
+
+"""
+    xml_children(page, tag) -> Vector
+
+Every child element named `tag` in an AWS.jl-parsed XML `page`, tolerant of BOTH shapes AWS.jl's
+XMLDict parser produces. Usually siblings merge under the tag name (`page[tag]`, normalized via
+`as_vector`). But some list responses (`ListVersionsResult`, `ListMultipartUploadsResult`) trigger
+XMLDict's *ordered fallback*: the whole child list lands under a single `""` key as a `Vector` of
+one-key dicts (`page[""] = [Dict("Name"=>…), Dict("Version"=>…), Dict("Version"=>…), …]`), so
+`haskey(page,tag)` is false and a naive `page[tag]` read silently yields nothing. This recovers
+`tag`'s children from whichever shape is present (empty `Vector` if absent). See `xml_scalar` for
+the scalar-child companion.
+"""
+xml_children(page, tag) = haskey(page, tag) ? as_vector(page[tag]) :
+    (haskey(page, "") ? Any[e[tag] for e in page[""] if e isa AbstractDict && haskey(e, tag)] : Any[])
+
+"""
+    xml_scalar(page, tag, default="")
+
+A single scalar child (`IsTruncated`, `NextKeyMarker`, …) of an AWS.jl-parsed XML `page`, tolerant
+of both the merged shape (`page[tag]`) and XMLDict's ordered-fallback shape (a matching one-key
+dict inside `page[""]`). Returns `default` when absent. Companion to `xml_children`.
+"""
+function xml_scalar(page, tag, default="")
+    haskey(page, tag) && return page[tag]
+    if haskey(page, "")
+        for e in page[""]
+            e isa AbstractDict && haskey(e, tag) && return e[tag]
+        end
+    end
+    return default
+end
 
 """
     username_from_arn(arn) -> String
