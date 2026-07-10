@@ -115,7 +115,10 @@ resource "aws_iam_role_policy" "lab_operator" {
         Effect = "Allow"
         Action = [
           "s3:ListBucket",
-          "s3:ListBucketVersions"
+          "s3:ListBucketVersions",
+          # Teardown must find in-flight multipart uploads: a versioned bucket with zero
+          # object versions still refuses delete_bucket while any multipart upload is open.
+          "s3:ListBucketMultipartUploads"
         ]
         Resource = [
           "arn:aws:s3:::research-*",
@@ -134,7 +137,10 @@ resource "aws_iam_role_policy" "lab_operator" {
           "s3:DeleteObject",
           "s3:DeleteObjectVersion",
           "s3:GetObject",
-          "s3:GetObjectVersion"
+          "s3:GetObjectVersion",
+          # Abort in-flight multipart uploads during teardown (paired with the
+          # ListBucketMultipartUploads grant above).
+          "s3:AbortMultipartUpload"
         ]
         Resource = [
           "arn:aws:s3:::research-*/*",

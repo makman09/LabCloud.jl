@@ -156,6 +156,38 @@ function _delete_object_versions(bucket_name, bypass_cfg)
 end
 
 """
+    _abort_incomplete_multipart_uploads(bucket_name, bypass_cfg)
+
+Paginates `s3:ListMultipartUploads` and aborts every in-progress multipart upload. A versioned
+bucket with zero object versions/markers still refuses `delete_bucket` with `BucketNotEmpty`
+while any multipart upload is in flight — these aren't listed by `ListObjectVersions` and aren't
+removed by deleting objects. Large-file pushes (>`MULTIPART_THRESHOLD`) that were interrupted
+leave them behind; the `abort-incomplete-multipart-uploads` lifecycle rule only reclaims them
+asynchronously (after `multipart_abort_days`), so a synchronous teardown must abort them itself.
+AWS.jl's XML wire name for the list element is `Upload` (singular). Runs on the MFA `bypass`
+session — `s3:ListBucketMultipartUploads`/`s3:AbortMultipartUpload` are MFA-gated on the role.
+"""
+function _abort_incomplete_multipart_uploads(bucket_name, bypass_cfg)
+    key_marker, upload_id_marker = "", ""
+    while true
+        params = Dict{String,Any}()
+        isempty(key_marker) || (params["key-marker"] = key_marker)
+        isempty(upload_id_marker) || (params["upload-id-marker"] = upload_id_marker)
+        page = isempty(params) ? S3.list_multipart_uploads(bucket_name; aws_config=bypass_cfg) :
+                                  S3.list_multipart_uploads(bucket_name, params; aws_config=bypass_cfg)
+
+        uploads = haskey(page, "Upload") ? as_vector(page["Upload"]) : []
+        for u in uploads
+            S3.abort_multipart_upload(bucket_name, u["Key"], u["UploadId"]; aws_config=bypass_cfg)
+        end
+
+        get(page, "IsTruncated", "false") == "true" || break
+        key_marker = get(page, "NextKeyMarker", "")
+        upload_id_marker = get(page, "NextUploadIdMarker", "")
+    end
+end
+
+"""
     mfa_delete(spec, name, bucket_name, mfa_code, username) -> (deleted, bucket)
 
 MFA-gated teardown: delete the IAM user, empty the versioned bucket under governance bypass,
@@ -193,13 +225,27 @@ function mfa_delete(spec::EntitySpec, name, bucket_name, mfa_code, username)
         return (deleted=name, bucket=bucket_name)
     end
 
+    # Empty every way a versioned bucket can hold state: object versions + delete markers, then
+    # in-flight multipart uploads. Both run on the MFA `bypass` session and must precede
+    # delete_bucket, or it fails with BucketNotEmpty.
     _delete_object_versions(bucket_name, bypass)
+    _abort_incomplete_multipart_uploads(bucket_name, bypass)
 
     try
         S3.delete_bucket_policy(bucket_name; aws_config=operator)
     catch
     end
-    S3.delete_bucket(bucket_name; aws_config=operator)
+    try
+        S3.delete_bucket(bucket_name; aws_config=operator)
+    catch e
+        # The IAM user is already gone at this point (teardown is non-atomic), so surface a clear,
+        # actionable message instead of a raw stacktrace rather than leave the operator guessing.
+        _error_code(e) == "BucketNotEmpty" && throw(AppError(
+            "Bucket '$bucket_name' still not empty after purging versions and multipart uploads — " *
+            "the IAM user was already deleted. Check for residual state (e.g. a still-running " *
+            "upload) and re-run `delete $name` to finish removing the bucket and registry row."))
+        rethrow()
+    end
     println("  Deleted bucket '$bucket_name'")
 
     _purge_rows(spec, name)
