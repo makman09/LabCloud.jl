@@ -1,3 +1,5 @@
 lab.so
 .env
 lab_customers.db
+terraform/.terraform
+.DS_Store
