@@ -212,7 +212,14 @@ function mfa_delete(spec::EntitySpec, name, bucket_name, mfa_code, username)
         IAM.delete_user(username; aws_config=operator)
         println("  Deleted IAM user '$username'")
     catch e
-        _error_code(e) == "NoSuchEntity" || rethrow()
+        # A missing IAM user surfaces two ways: NoSuchEntity when the name still resolves within
+        # the operator's permitted scope, but AccessDenied once the user is gone — managed users
+        # live at LAB_CUSTOMER_PATH and the operator policy is scoped to `user/lab-customers/*`,
+        # so AWS evaluates a bare-name (root-path) arn for a nonexistent user and denies it rather
+        # than reporting NoSuchEntity. Both mean "already gone" for teardown; treat them alike so a
+        # re-run after a partial delete (e.g. a bucket failure that left the IAM user deleted) can
+        # recover instead of wedging.
+        _error_code(e) in ("NoSuchEntity", "AccessDenied") || rethrow()
         println("  IAM user '$username' already gone, skipping")
     end
 
