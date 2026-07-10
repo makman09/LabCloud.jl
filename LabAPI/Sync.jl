@@ -20,16 +20,17 @@ module Sync
 using Dates: datetime2unix
 using JSON3
 
-using ..Config: EXCLUDED_NAS_DIRS, PREFIXES, config
+using ..Config: EXCLUDED_NAS_DIRS, PREFIXES, PARTICIPANTS_SUBPATH, PARTICIPANTS_PREFIX, config
 using ..Util: AppError, NAME_PATTERN, as_vector, _parse_iso8601
 using ..AWSIdent: AWSIdent
 
 const S3 = AWSIdent.S3
 
-export README_NAME, discover_nas_researchers, build_local_manifest,
+export README_NAME, discover_nas_researchers, discover_nas_participants, build_local_manifest,
        build_root_readme_local_manifest, build_s3_manifest, compute_sync_delta,
        progress_path, load_progress, save_progress, clear_progress,
-       build_researcher_keyset, list_bucket_current_keys, compute_bucket_orphans
+       build_researcher_keyset, list_bucket_current_keys, compute_bucket_orphans,
+       compute_participant_orphans
 
 # The researcher-root README.md syncs to the bucket-root `README.md` key (no prefix).
 const README_NAME = "README.md"
@@ -38,24 +39,43 @@ const LocalEntry = NamedTuple{(:size, :mtime),Tuple{Int,Float64}}
 const S3Entry = NamedTuple{(:size, :last_modified),Tuple{Int,Float64}}
 
 """
+    _discover_titlecase_dirs(base; exclude) -> Vector{String}
+
+Sorted TitleCase directory names directly under `base`, skipping dotfiles, non-dirs, anything
+in `exclude`, and anything not matching `NAME_PATTERN`. Raises `AppError` if `base` isn't a
+mounted directory. The shared body behind researcher and participant discovery.
+"""
+function _discover_titlecase_dirs(base; exclude)
+    isdir(base) || throw(AppError("NAS path '$base' is not accessible. Is the volume mounted?"))
+    names = String[]
+    for name in sort(readdir(base))
+        startswith(name, ".") && continue
+        isdir(joinpath(base, name)) || continue
+        name in exclude && continue
+        match(NAME_PATTERN, name) === nothing && continue
+        push!(names, name)
+    end
+    return names
+end
+
+"""
     discover_nas_researchers(nas_path) -> Vector{String}
 
 Sorted TitleCase researcher dirs under `nas_path`, skipping dotfiles and `EXCLUDED_NAS_DIRS`.
 Raises `AppError` (the `click.ClickException` analog) if the path isn't a mounted directory.
 Mirrors `src/sync.py::discover_nas_researchers`.
 """
-function discover_nas_researchers(nas_path)
-    isdir(nas_path) || throw(AppError("NAS path '$nas_path' is not accessible. Is the volume mounted?"))
-    researchers = String[]
-    for name in sort(readdir(nas_path))
-        startswith(name, ".") && continue
-        isdir(joinpath(nas_path, name)) || continue
-        name in EXCLUDED_NAS_DIRS && continue
-        match(NAME_PATTERN, name) === nothing && continue
-        push!(researchers, name)
-    end
-    return researchers
-end
+discover_nas_researchers(nas_path) = _discover_titlecase_dirs(nas_path; exclude=EXCLUDED_NAS_DIRS)
+
+"""
+    discover_nas_participants(nas_path) -> Vector{String}
+
+Sorted TitleCase participant dirs under `<nas_path>/Caucell/Data` (`--participants` mode). No
+exclusion set — the `Caucell` name only shadows a top-level researcher, and the base here is
+already inside it.
+"""
+discover_nas_participants(nas_path) =
+    _discover_titlecase_dirs(joinpath(nas_path, PARTICIPANTS_SUBPATH); exclude=Set{String}())
 
 """
     build_local_manifest(data_dir) -> Dict{String,LocalEntry}
@@ -200,6 +220,19 @@ function compute_bucket_orphans(cfg, bucket_name, researcher_root)
     keyset = build_researcher_keyset(researcher_root)
     return [k for k in list_bucket_current_keys(cfg, bucket_name)
             if k != README_NAME && !(k in keyset)]
+end
+
+"""
+    compute_participant_orphans(cfg, bucket_name, participant_root) -> Vector{String}
+
+`--participants` mode drift: current `Data/`-prefix S3 keys with no corresponding NAS file under
+the participant root. Scoped to the `Data/` prefix ONLY — the other provisioned prefixes
+(`Archive/ Result/ Other/`) and the root `README.md` are left untouched, so `--overwrite` never
+disturbs them.
+"""
+function compute_participant_orphans(cfg, bucket_name, participant_root)
+    keyset = Set("$(PARTICIPANTS_PREFIX)$(rel)" for rel in keys(build_local_manifest(participant_root)))
+    return [k for k in keys(build_s3_manifest(cfg, bucket_name, PARTICIPANTS_PREFIX)) if !(k in keyset)]
 end
 
 # ---------------------------------------------------------------------------------------

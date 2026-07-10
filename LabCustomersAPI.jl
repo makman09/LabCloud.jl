@@ -100,12 +100,19 @@ end
 # `run_push` to avoid colliding with the `push` @cast command below.
 # ----------------------------------------------------------------------------------------
 
-function _resolve_researchers(nas_path, researcher_filter)
-    researchers = discover_nas_researchers(nas_path)
+# In `--participants` mode, researchers live one level deeper (under `Caucell/Data`) and the
+# participant's whole root maps to the single `Data/` prefix. `_researcher_root` centralizes that
+# path choice so plan/orphan paths stay single-sourced.
+_researcher_root(nas_path, name, participants) =
+    participants ? joinpath(nas_path, PARTICIPANTS_SUBPATH, name) : joinpath(nas_path, name)
+
+function _resolve_researchers(nas_path, researcher_filter; participants=false)
+    researchers = participants ? discover_nas_participants(nas_path) : discover_nas_researchers(nas_path)
     if !isempty(researcher_filter)
         validate_customer_name(researcher_filter)
+        noun = participants ? "Participant" : "Researcher"
         researcher_filter in researchers ||
-            throw(AppError("Researcher '$researcher_filter' not found on NAS at $nas_path"))
+            throw(AppError("$noun '$researcher_filter' not found on NAS at $nas_path"))
         return [researcher_filter]
     end
     return researchers
@@ -113,10 +120,11 @@ end
 
 _manifest_bytes(manifest) = sum(Int[v.size for v in values(manifest)])
 
-"""Read-only sub-plan for one prefix (Data/, Result/, ...) of one researcher. `nothing` when
-the prefix dir is absent or empty on NAS. Mirrors `LabCustomersAPI.py::_plan_prefix`."""
-function _plan_prefix(bucket_name, root, prefix, needs_provision, s3)
-    sub_dir = joinpath(root, rstrip(prefix, '/'))
+"""Read-only sub-plan for one local dir → one S3 prefix. `nothing` when `sub_dir` is absent or
+empty on NAS. Generalizes `LabCustomersAPI.py::_plan_prefix` so the local dir, S3 prefix, and
+display label can vary independently (researcher `root/Data` → `Data/`, or a participant root →
+`Data/`)."""
+function _plan_unit(bucket_name, sub_dir, prefix, label, needs_provision, s3)
     isdir(sub_dir) || return nothing
 
     local_manifest = build_local_manifest(sub_dir)
@@ -132,7 +140,7 @@ function _plan_prefix(bucket_name, root, prefix, needs_provision, s3)
 
     return (
         prefix = prefix,
-        label = prefix,
+        label = label,
         data_dir = sub_dir,
         local_files = length(local_manifest),
         local_bytes = _manifest_bytes(local_manifest),
@@ -141,6 +149,12 @@ function _plan_prefix(bucket_name, root, prefix, needs_provision, s3)
         delta_bytes = sum(Int[local_manifest[rel].size for rel in delta]),
     )
 end
+
+"""Read-only sub-plan for one managed prefix (Data/, Result/, ...) of one researcher — the
+researcher-layout wrapper over `_plan_unit` (`root/<Prefix>` local dir, prefix as its own label).
+Mirrors `LabCustomersAPI.py::_plan_prefix`."""
+_plan_prefix(bucket_name, root, prefix, needs_provision, s3) =
+    _plan_unit(bucket_name, joinpath(root, rstrip(prefix, '/')), prefix, prefix, needs_provision, s3)
 
 """Read-only sub-plan for the researcher-root README.md → bucket-root `README.md` (empty
 prefix). `nothing` when there is no README.md on NAS. Mirrors `_plan_root_readme`."""
@@ -170,24 +184,31 @@ end
 """Read-only: compute exactly what a push would upload for one researcher. Contacts S3 and
 computes the real size+mtime delta for provisioned researchers. Persists nothing. Mirrors
 `LabCustomersAPI.py::_plan_push`."""
-function _plan_push(name, nas_path, conn)
+function _plan_push(name, nas_path, conn; participants=false)
     bucket_name = "research-$(lowercase(name))"
     needs_provision = isempty([row for row in SQLite.DBInterface.execute(
         conn, "SELECT 1 FROM customers WHERE customer_name = ?", (name,))])
 
-    root = joinpath(nas_path, name)
+    root = _researcher_root(nas_path, name, participants)
     s3 = needs_provision ? nothing : assume_lab_operator()
 
-    sub_plans = Any[_plan_prefix(bucket_name, root, prefix, needs_provision, s3) for prefix in PREFIXES]
-    push!(sub_plans, _plan_root_readme(bucket_name, root, needs_provision, s3))
+    if participants
+        # Participant's whole root → single `Data/` prefix; no per-prefix subdirs, no root README.
+        sub_plans = Any[_plan_unit(bucket_name, root, PARTICIPANTS_PREFIX,
+                                   "Data/ (participant root)", needs_provision, s3)]
+        skip_reason_msg = "no files under participant root → Data/"
+    else
+        sub_plans = Any[_plan_prefix(bucket_name, root, prefix, needs_provision, s3) for prefix in PREFIXES]
+        push!(sub_plans, _plan_root_readme(bucket_name, root, needs_provision, s3))
+        skip_reason_msg = "no populated prefixes (Data/Result/Archive/Other) or root README.md"
+    end
     prefixes = [sub for sub in sub_plans if sub !== nothing]
 
     return (
         bucket_name = bucket_name,
         needs_provision = needs_provision,
         prefixes = prefixes,
-        skip_reason = isempty(prefixes) ?
-            "no populated prefixes (Data/Result/Archive/Other) or root README.md" : nothing,
+        skip_reason = isempty(prefixes) ? skip_reason_msg : nothing,
         local_files = sum(Int[sub.local_files for sub in prefixes]),
         local_bytes = sum(Int[sub.local_bytes for sub in prefixes]),
         delta_count = sum(Int[sub.delta_count for sub in prefixes]),
@@ -195,11 +216,11 @@ function _plan_push(name, nas_path, conn)
     )
 end
 
-function run_push(; dry_run=false, researcher_filter="", nas_path="", overwrite=false)
+function run_push(; dry_run=false, researcher_filter="", nas_path="", overwrite=false, participants=false)
     nas_path = isempty(nas_path) ? config().nas_research_path : nas_path
-    researchers = _resolve_researchers(nas_path, researcher_filter)
+    researchers = _resolve_researchers(nas_path, researcher_filter; participants=participants)
     if isempty(researchers)
-        println("No researchers found on NAS.")
+        println(participants ? "No participants found on NAS." : "No researchers found on NAS.")
         return
     end
 
@@ -216,7 +237,9 @@ function run_push(; dry_run=false, researcher_filter="", nas_path="", overwrite=
     function handle_orphans(name, root, plan)
         plan.needs_provision && return
         orphans = try
-            compute_bucket_orphans(assume_lab_operator(), plan.bucket_name, root)
+            participants ?
+                compute_participant_orphans(assume_lab_operator(), plan.bucket_name, root) :
+                compute_bucket_orphans(assume_lab_operator(), plan.bucket_name, root)
         catch e
             msg = e isa AppError ? e.msg : sprint(showerror, e)
             println("    ERROR checking drift: $msg")
@@ -243,7 +266,7 @@ function run_push(; dry_run=false, researcher_filter="", nas_path="", overwrite=
     for name in researchers
         println("  $name")
         plan = try
-            _plan_push(name, nas_path, conn)
+            _plan_push(name, nas_path, conn; participants=participants)
         catch e
             msg = e isa AppError ? e.msg : sprint(showerror, e)
             println("    ERROR planning: $msg")
@@ -251,7 +274,7 @@ function run_push(; dry_run=false, researcher_filter="", nas_path="", overwrite=
             continue
         end
 
-        root = joinpath(nas_path, name)
+        root = _researcher_root(nas_path, name, participants)
 
         if plan.skip_reason !== nothing
             println("    $(plan.skip_reason) — skipped")
@@ -428,9 +451,14 @@ Read-only reconcile of NAS vs DB vs AWS for each researcher.
 
 - `--researcher=<name>`: reconcile only this researcher (TitleCase name).
 - `--nas-path=<path>`: override NAS research path.
+
+# Flags
+
+- `--participants`: reconcile participants under `<nas-path>/Caucell/Data` instead of top-level
+  researchers. Each participant's whole root is compared against the `Data/` prefix of their bucket.
 """
-@cast function status(; researcher::String="", nas_path::String="")
-    render_status(status_report(; researcher_filter=researcher, nas_path=nas_path))
+@cast function status(; researcher::String="", nas_path::String="", participants::Bool=false)
+    render_status(status_report(; researcher_filter=researcher, nas_path=nas_path, participants=participants))
 end
 
 """
@@ -453,10 +481,14 @@ provisioned root `README.md` placeholder is always left in place.
 - `--dry-run`: run the identical plan (real S3 delta) but stop at the write guard.
 - `--overwrite`: remove S3 objects not present on NAS (requires `--researcher`; prompts for
   confirmation unless `--yes`). With `--dry-run`, previews the removals without deleting.
+- `--participants`: push participants under `<nas-path>/Caucell/Data` instead of top-level
+  researchers. Each participant's whole root uploads to the `Data/` prefix of their bucket
+  (provisioning a missing bucket exactly as a researcher would). `--overwrite` drift is scoped to
+  the `Data/` prefix only.
 - `--yes`: skip the `--overwrite` confirmation prompt (non-interactive use).
 """
 @cast function push(; dry_run::Bool=false, researcher::String="", nas_path::String="",
-                    overwrite::Bool=false, yes::Bool=false)
+                    overwrite::Bool=false, yes::Bool=false, participants::Bool=false)
     if overwrite && isempty(researcher)
         throw(AppError("--overwrite requires --researcher"))
     end
@@ -465,7 +497,8 @@ provisioned root `README.md` placeholder is always left in place.
             "for '$researcher' (writes delete markers; current view only, not a version erase). " *
             "Continue? [y/N]: ")
     end
-    run_push(; dry_run=dry_run, researcher_filter=researcher, nas_path=nas_path, overwrite=overwrite)
+    run_push(; dry_run=dry_run, researcher_filter=researcher, nas_path=nas_path,
+             overwrite=overwrite, participants=participants)
 end
 
 """

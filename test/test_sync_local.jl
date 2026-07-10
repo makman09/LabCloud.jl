@@ -30,6 +30,28 @@
         end
     end
 
+    @testset "discover_nas_participants" begin
+        # Participants live one level deeper, under `<nas>/Caucell/Data`.
+        mktempdir() do d
+            base = joinpath(d, "Caucell", "Data"); mkpath(base)
+            mkdir(joinpath(base, "JohnSmith")); mkdir(joinpath(base, "JaneDoe"))
+            # Top-level dirs (including a would-be researcher) are NOT participants.
+            mkdir(joinpath(d, "TopLevel"))
+            @test discover_nas_participants(d) == ["JaneDoe", "JohnSmith"]
+        end
+        # Same TitleCase / dotfile / non-dir filtering as researcher discovery.
+        mktempdir() do d
+            base = joinpath(d, "Caucell", "Data"); mkpath(base)
+            mkdir(joinpath(base, ".hidden")); mkdir(joinpath(base, "lowercase"))
+            mkdir(joinpath(base, "JohnSmith")); write(joinpath(base, "JaneDoe"), "not a dir")
+            @test discover_nas_participants(d) == ["JohnSmith"]
+        end
+        # Missing `Caucell/Data` base raises (volume/path not present).
+        mktempdir() do d
+            @test_throws AppError discover_nas_participants(d)
+        end
+    end
+
     @testset "build_local_manifest" begin
         mktempdir() do d
             write(joinpath(d, "file1.txt"), "hello"); write(joinpath(d, "file2.txt"), "world!")

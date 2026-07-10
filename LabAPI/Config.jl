@@ -20,12 +20,20 @@ module Config
 using ..Util: AppError
 
 export AppConfig, config, PREFIXES, ROTATION_DAYS, EXCLUDED_NAS_DIRS,
+       PARTICIPANTS_SUBPATH, PARTICIPANTS_PREFIX,
        UPLOAD_BATCH_SIZE, MULTIPART_THRESHOLD, MULTIPART_CHUNKSIZE, MULTIPART_CONCURRENCY
 
 # Non-env constants — same values for every process, safe as real `const`s.
 const PREFIXES = ["Archive/", "Data/", "Other/", "Result/"]
 const ROTATION_DAYS = 90
 const EXCLUDED_NAS_DIRS = Set(["Caucell"])
+
+# `--participants` mode: participants live one level deeper than researchers, under the fixed
+# `Research/Caucell/Data` subpath, and each participant's whole root maps to the single `Data/`
+# bucket prefix (not the four-prefix researcher layout). `Caucell` is in EXCLUDED_NAS_DIRS above,
+# so these dirs stay invisible to normal researcher discovery.
+const PARTICIPANTS_SUBPATH = joinpath("Caucell", "Data")
+const PARTICIPANTS_PREFIX = "Data/"
 const UPLOAD_BATCH_SIZE = 50
 
 # Mirror of Python's TRANSFER_CONFIG (boto3 TransferConfig): files above the threshold go

@@ -11,12 +11,13 @@ module Status
 
 using SQLite
 
-using ..Config: config
+using ..Config: config, PARTICIPANTS_SUBPATH, PARTICIPANTS_PREFIX
 using ..DB: init_db
 using ..Util: AppError, fmt_size, validate_customer_name, username_from_arn
 using ..AWSIdent: AWSIdent, assume_lab_operator, _error_code
-using ..Sync: Sync, README_NAME, discover_nas_researchers, build_local_manifest,
-              build_root_readme_local_manifest, build_s3_manifest, compute_sync_delta
+using ..Sync: Sync, README_NAME, discover_nas_researchers, discover_nas_participants,
+              build_local_manifest, build_root_readme_local_manifest, build_s3_manifest,
+              compute_sync_delta
 
 const IAM = AWSIdent.IAM
 const S3 = AWSIdent.S3
@@ -61,36 +62,43 @@ function probe_iam_user_exists(iam_prov, username)
     end
 end
 
-"""Reconcile one bucket against NAS across the role's full prefix set (read-only)."""
-function reconcile_bucket(s3_phi, bucket_name, role, name, nas_root)
+"""Reconcile one bucket against NAS across the role's prefix set (read-only). In `participants`
+mode the researcher-layout prefix set is replaced by a single unit: the participant's whole root
+→ the `Data/` prefix (no per-prefix subdirs, no root README), so drift stays scoped to `Data/`."""
+function reconcile_bucket(s3_phi, bucket_name, role, name, nas_root; participants=false)
     nas_ahead_label, s3_ahead_label, prefixes = RECONCILE[role]
     researcher_root = joinpath(nas_root, name)
-    results = Any[]
 
-    for prefix in prefixes
-        is_root = prefix == ""
-        if is_root
+    # Each unit is (prefix, local_dir, is_root). Researcher layout: root README + one per managed
+    # prefix (`root/<Prefix>`). Participant layout: the single Data/ unit rooted at the whole dir.
+    units = participants ?
+        [(prefix=PARTICIPANTS_PREFIX, local_dir=researcher_root, is_root=false)] :
+        [(prefix=p, local_dir=(p == "" ? researcher_root : joinpath(researcher_root, rstrip(p, '/'))),
+          is_root=(p == "")) for p in prefixes]
+
+    results = Any[]
+    for u in units
+        if u.is_root
             # Root: reconcile only README.md (researcher-root → bucket-root `README.md`).
             local_manifest = build_root_readme_local_manifest(researcher_root)
             s3_manifest = build_s3_manifest(s3_phi, bucket_name, README_NAME)
         else
-            local_dir = joinpath(researcher_root, rstrip(prefix, '/'))
-            local_manifest = isdir(local_dir) ? build_local_manifest(local_dir) :
+            local_manifest = isdir(u.local_dir) ? build_local_manifest(u.local_dir) :
                              Dict{String,Sync.LocalEntry}()
-            s3_manifest = build_s3_manifest(s3_phi, bucket_name, prefix)
+            s3_manifest = build_s3_manifest(s3_phi, bucket_name, u.prefix)
         end
 
         # size+mtime delta — same rule `push` uses, so this count matches exactly what
         # a push would actually upload (missing, size differs, or locally newer).
-        to_upload = compute_sync_delta(local_manifest, s3_manifest, prefix)
+        to_upload = compute_sync_delta(local_manifest, s3_manifest, u.prefix)
 
-        local_keys = Set("$prefix$rel" for rel in keys(local_manifest))
+        local_keys = Set("$(u.prefix)$rel" for rel in keys(local_manifest))
         # At the root the provisioned README.md placeholder is managed state, not drift, so an
         # S3-only README is expected — don't report it as an orphan.
-        orphans = is_root ? String[] : [k for k in keys(s3_manifest) if !(k in local_keys)]
+        orphans = u.is_root ? String[] : [k for k in keys(s3_manifest) if !(k in local_keys)]
 
         push!(results, (
-            prefix = is_root ? README_NAME : prefix,
+            prefix = u.is_root ? README_NAME : u.prefix,
             local_files = length(local_manifest),
             s3_files = length(s3_manifest),
             local_bytes = sum(Int[v.size for v in values(local_manifest)]),
@@ -106,7 +114,7 @@ end
 """Per-researcher block: IAM user + each per-researcher bucket's existence/reconcile. `arn`
 is the registry `iam_user_arn` (or "" for NAS-only names with no DB row); the IAM username to
 probe is derived from it, falling back to the bare `name` a future provision would use."""
-function reconcile_researcher(name, in_db, arn, nas_root, iam_prov, s3_phi)
+function reconcile_researcher(name, in_db, arn, nas_root, iam_prov, s3_phi; participants=false)
     buckets = Dict{String,Any}()
     for role in BUCKET_ROLES
         bucket_name = "$role-$(lowercase(name))"
@@ -114,7 +122,8 @@ function reconcile_researcher(name, in_db, arn, nas_root, iam_prov, s3_phi)
             buckets[role] = (bucket=bucket_name, exists=false, prefixes=nothing)
         else
             buckets[role] = (bucket=bucket_name, exists=true,
-                             prefixes=reconcile_bucket(s3_phi, bucket_name, role, name, nas_root))
+                             prefixes=reconcile_bucket(s3_phi, bucket_name, role, name, nas_root;
+                                                       participants=participants))
         end
     end
     iam_username = isempty(arn) ? name : username_from_arn(arn)
@@ -132,11 +141,16 @@ end
     status_report(; researcher_filter="", nas_path="") -> NamedTuple
 
 Reconcile NAS vs DB vs AWS for each researcher. Pure read-only. Empty `researcher_filter`
-means whole-volume; empty `nas_path` falls back to `config().nas_research_path`. Mirrors
+means whole-volume; empty `nas_path` falls back to `config().nas_research_path`. With
+`participants=true`, discovery and reconcile target `<nas_path>/Caucell/Data` (each participant's
+whole root vs the `Data/` bucket prefix) instead of top-level researchers. Mirrors
 `src/status.py::status_report`.
 """
-function status_report(; researcher_filter="", nas_path="")
+function status_report(; researcher_filter="", nas_path="", participants=false)
     nas_path = isempty(nas_path) ? config().nas_research_path : nas_path
+    # `base` is where the discovered names live; participants are one level deeper. Passed as
+    # `nas_root` to reconcile_researcher so `joinpath(base, name)` resolves correctly in both modes.
+    base = participants ? joinpath(nas_path, PARTICIPANTS_SUBPATH) : nas_path
 
     conn = init_db()
     db_arns = Dict(row.customer_name => row.iam_user_arn for row in
@@ -147,11 +161,11 @@ function status_report(; researcher_filter="", nas_path="")
     if !isempty(researcher_filter)
         validate_customer_name(researcher_filter)
         targets = [researcher_filter]
-        on_nas = isdir(joinpath(nas_path, researcher_filter))
+        on_nas = isdir(joinpath(base, researcher_filter))
         on_nas_not_in_db = (on_nas && !(researcher_filter in db_names)) ? [researcher_filter] : String[]
         in_db_not_on_nas = (researcher_filter in db_names && !on_nas) ? [researcher_filter] : String[]
     else
-        nas_researchers = discover_nas_researchers(nas_path)
+        nas_researchers = participants ? discover_nas_participants(nas_path) : discover_nas_researchers(nas_path)
         targets = nas_researchers
         nas_set = Set(nas_researchers)
         on_nas_not_in_db = sort(collect(setdiff(nas_set, db_names)))
@@ -166,12 +180,13 @@ function status_report(; researcher_filter="", nas_path="")
         operator = assume_lab_operator()
         for name in targets
             push!(researchers, reconcile_researcher(name, name in db_names,
-                                                    get(db_arns, name, ""), nas_path, operator, operator))
+                                                    get(db_arns, name, ""), base, operator, operator;
+                                                    participants=participants))
         end
     end
 
     return (
-        nas_path = nas_path,
+        nas_path = base,
         on_nas_not_in_db = on_nas_not_in_db,
         in_db_not_on_nas = in_db_not_on_nas,
         researchers = researchers,
