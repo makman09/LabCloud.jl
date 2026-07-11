@@ -63,6 +63,7 @@ end
     if haskey(ENV, "AWS_ENDPOINT_URL")
         include("test_provision_aws.jl")
         include("test_upload_aws.jl")
+        include("test_download_aws.jl")
     else
         @info "AWS_ENDPOINT_URL not set — skipping LocalStack-backed provision/S3/upload tests"
     end

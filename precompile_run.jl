@@ -5,10 +5,10 @@ PackageCompiler traces whatever this script *runs* and bakes those specializatio
 `lab.so`. A thin `using`-only warmup leaves the expensive path cold: Comonicon's argument
 parser and command dispatch don't compile until the first real CLI invocation — which is the
 "slow first run" the sysimage is supposed to kill. So here we `include` the actual
-entrypoints and drive their offline-safe commands (`list`, `get`, `list-orders`) end to end,
+entrypoints and drive their offline-safe commands (`list`, `get`) end to end,
 plus the shared Util/DB helpers those commands lean on.
 
-Only offline commands run: `create`/`rotate`/`delete`/`push`/`status`/`new-order` all reach
+Only offline commands run: `create`/`rotate`/`delete`/`push`/`status`/`pull` all reach
 AWS or the NAS and can't execute during a build, so they stay JIT. `LabAPI` itself is
 `include`-d source (not a baked package), so its own glue always JITs a little at runtime —
 the durable win here is the *package* internals (Comonicon parse+dispatch, SQLite row
@@ -38,7 +38,7 @@ ENV["DB_PATH"] = joinpath(mktempdir(), "precompile.db")
 include(joinpath(@__DIR__, "LabCustomersAPI.jl"))
 include(joinpath(@__DIR__, "LabVendorAPI.jl"))
 
-# Seed one valid row per table so `list`/`get`/`list-orders` exercise the row-materialization
+# Seed one valid row per table so `list`/`get` exercise the row-materialization
 # and formatting paths, not just the empty-result branch. Values satisfy the DDL CHECKs
 # (see DB.jl). Helpers are qualified through `LabAPI` because including both entrypoints
 # defines the module twice, which makes the re-exported names ambiguous unqualified in Main.
@@ -73,7 +73,6 @@ redirect_stdout(devnull) do
             (Main.CustomersCLI, ["get", "JohnSmith"]),
             (Main.VendorCLI,    ["list"]),
             (Main.VendorCLI,    ["get", "genewiz"]),
-            (Main.VendorCLI,    ["list-orders", "genewiz"]),
         )
             try
                 empty!(ARGS); append!(ARGS, argv)

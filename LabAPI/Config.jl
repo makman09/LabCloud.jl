@@ -59,6 +59,7 @@ struct AppConfig
     db_path::String
     multipart_abort_days::Int
     nas_research_path::String
+    nas_vendors_path::String
     sync_progress_dir::String
     sync_workers::Int
 end
@@ -127,6 +128,7 @@ function config()
         get(ENV, "DB_PATH", "lab_customers.db"),
         parse(Int, get(ENV, "MULTIPART_ABORT_DAYS", "7")),
         get(ENV, "NAS_RESEARCH_PATH", "/Volumes/CaucellVolumeI/Research"),
+        get(ENV, "NAS_VENDORS_PATH", "/Volumes/CaucellVolumeI/Vendors"),
         get(ENV, "SYNC_PROGRESS_DIR", joinpath(homedir(), ".caucell", "sync_progress")),
         parse(Int, get(ENV, "SYNC_WORKERS", "10")),
     )

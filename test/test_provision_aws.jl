@@ -53,4 +53,25 @@ _unescapeuri(s) = replace(String(s), r"%[0-9A-Fa-f]{2}" => m -> string(Char(pars
         @test Set(keys(sids)) == Set(["ListOwnBucket", "ReadAllPrefixes", "WriteIncomingOnly"])
         @test Set(String.(sids["ListOwnBucket"]["Action"])) == Set(["s3:ListBucket", "s3:GetBucketLocation"])
     end
+
+    @testset "put_vendor_s3_policy grants soft-delete and is re-appliable" begin
+        try
+            LabAPI.AWSIdent.IAM.create_group(config().vendor_group; aws_config = cfg)
+        catch  # group may already exist on a warm LocalStack
+        end
+        vbucket = "caucell-unit$sfx-landing"
+        create_vendor_iam_user(cfg, "unit$sfx", vbucket, "000000000000")
+        username = "LabVendor-unit$sfx"
+        # Drift + idempotence: re-apply standalone (the migrate-policy-settings path) twice.
+        put_vendor_s3_policy(cfg, username, vbucket)
+        put_vendor_s3_policy(cfg, username, vbucket)
+        resp = LabAPI.AWSIdent.IAM.get_user_policy("s3-bucket-access", username; aws_config = cfg)
+        doc = JSON3.read(_unescapeuri(resp["GetUserPolicyResult"]["PolicyDocument"]))
+        sids = Dict(String(s["Sid"]) => s for s in doc["Statement"])
+        @test Set(keys(sids)) == Set(["ListAndMultipartOnBucket", "ReadWriteObjects"])
+        objacts = Set(String.(sids["ReadWriteObjects"]["Action"]))
+        # Soft delete allowed; permanent version delete deliberately withheld.
+        @test "s3:DeleteObject" in objacts
+        @test !("s3:DeleteObjectVersion" in objacts)
+    end
 end

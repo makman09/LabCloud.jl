@@ -44,7 +44,8 @@ using ..Config: PREFIXES, config
 using ..AWSIdent
 
 export configure_bucket, create_prefix_structure, put_lab_customer_s3_policy,
-       create_lab_iam_user, create_vendor_readme, create_order_prefix, create_vendor_iam_user
+       create_lab_iam_user, create_vendor_readme, create_order_prefix, create_vendor_iam_user,
+       vendor_s3_policy_doc, put_vendor_s3_policy
 
 const S3_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/"
 
@@ -229,13 +230,50 @@ function create_order_prefix(cfg, bucket_name, order_id, kms_key_arn)
 end
 
 """
+    vendor_s3_policy_doc(bucket_name) -> Dict
+
+The `s3-bucket-access` inline policy granted to a `LabVendor-*` user: bucket-level
+`ListBucket`+`ListBucketMultipartUploads` on the **bucket** ARN (NOT `/*`, or large
+`aws s3 sync` uploads AccessDeny in real AWS) plus read/write/delete on `/*`. The
+`s3:DeleteObject` grant lets vendors freely arrange their bucket; on the versioned bucket a
+delete is a soft delete (delete marker), and `s3:DeleteObjectVersion` is deliberately withheld
+so underlying object versions stay retained under object lock.
+"""
+function vendor_s3_policy_doc(bucket_name)
+    Dict(
+        "Version" => "2012-10-17",
+        "Statement" => [
+            Dict("Sid" => "ListAndMultipartOnBucket", "Effect" => "Allow",
+                 "Action" => ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
+                 "Resource" => "arn:aws:s3:::$bucket_name"),
+            Dict("Sid" => "ReadWriteObjects", "Effect" => "Allow",
+                 "Action" => ["s3:PutObject", "s3:GetObject", "s3:DeleteObject",
+                              "s3:ListMultipartUploadParts", "s3:AbortMultipartUpload"],
+                 "Resource" => "arn:aws:s3:::$bucket_name/*"),
+        ],
+    )
+end
+
+"""
+    put_vendor_s3_policy(cfg, username, bucket_name)
+
+(Re)apply the scoped `s3-bucket-access` inline policy to an existing `LabVendor-*` user.
+`put_user_policy` overwrites in place, so this is idempotent and is how policy changes are
+migrated onto already-provisioned vendors (see `VendorCLI.migrate`).
+"""
+function put_vendor_s3_policy(cfg, username, bucket_name)
+    AWSIdent.IAM.put_user_policy(JSON3.write(vendor_s3_policy_doc(bucket_name)),
+        "s3-bucket-access", username; aws_config=cfg)
+    return nothing
+end
+
+"""
     create_vendor_iam_user(cfg, vendor_name, bucket_name, account_id) -> (user_arn, access_key_id, secret_key)
 
 Creates `LabVendor-{vendor_name}` (idempotent against `EntityAlreadyExists`), attaches the
-scoped `s3-bucket-access` inline policy — bucket-level `ListBucket`+`ListBucketMultipartUploads`
-on the **bucket** ARN (NOT `/*`, or large `aws s3 sync` uploads AccessDeny in real AWS) plus
-read/write on `/*` — adds it to `VENDOR_GROUP`, and mints an access key. Mirrors
-`src/provision.py::create_vendor_iam_user`.
+scoped `s3-bucket-access` inline policy via `put_vendor_s3_policy` (see `vendor_s3_policy_doc`
+for the grant and its soft-delete rationale), adds it to `VENDOR_GROUP`, and mints an access
+key. Mirrors `src/provision.py::create_vendor_iam_user`.
 """
 function create_vendor_iam_user(cfg, vendor_name, bucket_name, account_id)
     username = "LabVendor-$vendor_name"
@@ -255,19 +293,7 @@ function create_vendor_iam_user(cfg, vendor_name, bucket_name, account_id)
         end
     end
 
-    policy_doc = Dict(
-        "Version" => "2012-10-17",
-        "Statement" => [
-            Dict("Sid" => "ListAndMultipartOnBucket", "Effect" => "Allow",
-                 "Action" => ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
-                 "Resource" => "arn:aws:s3:::$bucket_name"),
-            Dict("Sid" => "ReadWriteObjects", "Effect" => "Allow",
-                 "Action" => ["s3:PutObject", "s3:GetObject",
-                              "s3:ListMultipartUploadParts", "s3:AbortMultipartUpload"],
-                 "Resource" => "arn:aws:s3:::$bucket_name/*"),
-        ],
-    )
-    AWSIdent.IAM.put_user_policy(JSON3.write(policy_doc), "s3-bucket-access", username; aws_config=cfg)
+    put_vendor_s3_policy(cfg, username, bucket_name)
     AWSIdent.IAM.add_user_to_group(config().vendor_group, username; aws_config=cfg)
 
     key = AWSIdent.IAM.create_access_key(Dict{String,Any}("UserName" => username); aws_config=cfg)

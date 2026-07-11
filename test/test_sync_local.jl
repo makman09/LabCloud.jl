@@ -137,6 +137,43 @@
         @test isempty(compute_sync_delta(local_m(), s3_m(("Data/x", 1, t))))
     end
 
+    @testset "compute_download_delta" begin
+        t = 1.75e9
+        local_m(entries...) = Dict{String,LabAPI.Sync.LocalEntry}(
+            k => (size=s, mtime=mt) for (k, s, mt) in entries)
+        s3_m(entries...) = Dict{String,LabAPI.Sync.S3Entry}(
+            k => (size=s, last_modified=lm) for (k, s, lm) in entries)
+
+        # Missing locally → download.
+        @test compute_download_delta(s3_m(("a.txt", 5, t)), local_m()) == ["a.txt"]
+        # Size differs → download (regardless of mtime).
+        @test compute_download_delta(s3_m(("a.txt", 9, t)), local_m(("a.txt", 5, t + 100))) == ["a.txt"]
+        # Same size, S3 NEWER → download (the mtime branch).
+        @test compute_download_delta(s3_m(("a.txt", 5, t + 10)), local_m(("a.txt", 5, t))) == ["a.txt"]
+        # Same size, S3 NOT newer → skip.
+        @test isempty(compute_download_delta(s3_m(("a.txt", 5, t - 10)), local_m(("a.txt", 5, t))))
+        @test isempty(compute_download_delta(s3_m(("a.txt", 5, t)), local_m(("a.txt", 5, t))))
+        # Keys are whole-bucket paths (no prefix), incl. nested.
+        @test compute_download_delta(s3_m(("b/c.txt", 5, t)), local_m()) == ["b/c.txt"]
+        # Empty bucket → nothing to download.
+        @test isempty(compute_download_delta(s3_m(), local_m(("a.txt", 5, t))))
+    end
+
+    @testset "compute_local_orphans" begin
+        t = 1.75e9
+        local_m(entries...) = Dict{String,LabAPI.Sync.LocalEntry}(
+            k => (size=s, mtime=mt) for (k, s, mt) in entries)
+        s3_m(entries...) = Dict{String,LabAPI.Sync.S3Entry}(
+            k => (size=s, last_modified=lm) for (k, s, lm) in entries)
+
+        # Local file absent from the bucket → orphan.
+        @test compute_local_orphans(s3_m(("a.txt", 5, t)), local_m(("a.txt", 5, t), ("stale.txt", 1, t))) == ["stale.txt"]
+        # Everything mirrored → no orphans.
+        @test isempty(compute_local_orphans(s3_m(("a.txt", 5, t)), local_m(("a.txt", 5, t))))
+        # Empty local → no orphans.
+        @test isempty(compute_local_orphans(s3_m(("a.txt", 5, t)), local_m()))
+    end
+
     @testset "progress files" begin
         withprogress() do d
             # Missing file → empty set.

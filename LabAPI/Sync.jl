@@ -30,7 +30,7 @@ export README_NAME, discover_nas_researchers, discover_nas_participants, build_l
        build_root_readme_local_manifest, build_s3_manifest, compute_sync_delta,
        progress_path, load_progress, save_progress, clear_progress,
        build_researcher_keyset, list_bucket_current_keys, compute_bucket_orphans,
-       compute_participant_orphans
+       compute_participant_orphans, compute_download_delta, compute_local_orphans
 
 # The researcher-root README.md syncs to the bucket-root `README.md` key (no prefix).
 const README_NAME = "README.md"
@@ -172,6 +172,39 @@ function compute_sync_delta(local_manifest, s3_manifest, s3_prefix="Data/")
         end
     end
     return to_upload
+end
+
+"""
+    compute_download_delta(s3_manifest, local_manifest) -> Vector{String}
+
+The S3→local mirror of `compute_sync_delta` (used by the vendor `pull`): a bucket object is
+downloaded if it's missing locally, its size differs, or the S3 object is newer than the local
+file. S3 keys here are already whole-bucket-relative (`build_s3_manifest(cfg, bucket, "")`), so
+they map straight onto local paths under the target dir — no prefix. Pure function of the two
+manifests: no AWS calls, no local I/O. Same same-size-same-mtime blind spot `aws s3 sync`
+accepts.
+"""
+function compute_download_delta(s3_manifest, local_manifest)
+    to_download = String[]
+    for (key, s3_info) in s3_manifest
+        local_info = get(local_manifest, key, nothing)
+        # `||` short-circuits before `.mtime` when the file is missing/size-differs.
+        if local_info === nothing || s3_info.size != local_info.size || s3_info.last_modified > local_info.mtime
+            push!(to_download, key)
+        end
+    end
+    return to_download
+end
+
+"""
+    compute_local_orphans(s3_manifest, local_manifest) -> Vector{String}
+
+Local-side drift for `pull --overwrite`: local files whose relative path has no corresponding
+key in the bucket manifest — the inverse of `compute_bucket_orphans`. These are the files an
+exact mirror deletes. Pure function of the two manifests.
+"""
+function compute_local_orphans(s3_manifest, local_manifest)
+    return [rel_path for rel_path in keys(local_manifest) if !haskey(s3_manifest, rel_path)]
 end
 
 # ---------------------------------------------------------------------------------------

@@ -179,8 +179,8 @@ Drop `--sysimage lab.so` if you haven't built it.
 | `create <name>` | Provision a landing bucket + IAM user for a new vendor (lowercase slug, e.g. `genewiz`) |
 | `get <name>` | Show details for a vendor |
 | `rotate <name>` | Rotate a vendor's credentials |
-| `new-order <vendor> [--notes=<text>]` | Mint a new `{uuid}/` order prefix under the vendor's landing bucket |
-| `list-orders <vendor>` | List all orders for a vendor |
+| `migrate-policy-settings <name> \| --all` | Re-apply bucket hardening and IAM policy to an existing vendor (or every vendor with `--all`) |
+| `pull <vendor> [--dry-run] [--overwrite]` | Mirror the vendor's landing bucket down to `<NAS_VENDORS_PATH>/<vendor>/` (incremental; `--overwrite` also deletes local files absent from the bucket) |
 | `delete <name> --mfa=<code> [--yes]` | Delete a vendor, their IAM user, bucket, and orders (requires MFA) |
 
 Run any command with `--help` for its full option list (Comonicon generates this
