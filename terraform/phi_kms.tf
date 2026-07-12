@@ -96,7 +96,12 @@ resource "aws_kms_key_policy" "phi" {
           StringLike = {
             "kms:EncryptionContext:aws:s3:arn" = [
               "arn:aws:s3:::research-*",
-              "arn:aws:s3:::research-*/*"
+              "arn:aws:s3:::research-*/*",
+              # Vendor landing objects are SSE-KMS with this key; routine decrypt is needed for
+              # the `labvendors pull` download flow (paired with S3LandingObjectRead in
+              # iam_policies.tf). Delete/bypass on landing stays MFA-gated elsewhere.
+              "arn:aws:s3:::caucell-*-landing",
+              "arn:aws:s3:::caucell-*-landing/*"
             ]
           }
         }

@@ -150,6 +150,22 @@ function run_pull(vendor; dry_run=false, overwrite=false)
     local_dir = joinpath(base, vendor)
 
     println("Pulling '$bucket_name' → $local_dir")
+    # Writability preflight (skipped for dry-run, which writes nothing): fail fast with one
+    # clear message instead of an EACCES per file. A vendor dir left root-owned by an earlier
+    # privileged run is the common cause on Linux. Runs before the AWS listing so a
+    # non-writable target doesn't waste a bucket round-trip.
+    if !dry_run
+        try
+            mkpath(local_dir)
+            probe = joinpath(local_dir, ".labcloud-write-test")
+            touch(probe)
+            rm(probe; force=true)
+        catch e
+            throw(AppError("Cannot write to '$local_dir' — check NAS mount permissions " *
+                           "(the user running this needs write access there). Underlying error: " *
+                           sprint(showerror, e)))
+        end
+    end
     cfg = assume_lab_operator()
     s3_manifest = build_s3_manifest(cfg, bucket_name, "")
     local_manifest = build_local_manifest(local_dir)
@@ -173,7 +189,6 @@ function run_pull(vendor; dry_run=false, overwrite=false)
         return (downloaded=0, failed=0, removed=0, skipped=length(s3_manifest) - length(to_download))
     end
 
-    mkpath(local_dir)
     downloaded, failed = download_bucket_to_dir(
         bucket_name, local_dir, [(k, s3_manifest[k].size) for k in to_download])
 

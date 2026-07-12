@@ -99,9 +99,11 @@ resource "aws_iam_role_policy" "lab_operator" {
 
   # Union of the former BucketProvisioner (control-plane), PhiApplicationRole (PHI data
   # plane), admin-delete-flow, and S3PhiBypassRole grants. Note what's deliberately absent: no
-  # DenyPHIReadAndDestroy guardrail (this role must read PHI content) and no read on
-  # caucell-*-landing/* outside the bypass Sid (vendor landing stays ingest-only for routine
-  # ops, matching the pre-existing boundary). ListResearchPhiBuckets and
+  # DenyPHIReadAndDestroy guardrail (this role must read PHI content). Routine read of
+  # caucell-*-landing/* is allowed (S3LandingObjectRead — the `labvendors pull` flow mirrors a
+  # vendor bucket down to the NAS); routine writes there stay Put-only, and delete /
+  # version-delete / governance-bypass on landing remain MFA-gated in the bypass Sid.
+  # ListResearchPhiBuckets and
   # BypassAndDeleteLockedObjects are the former phi_bypass_s3 policy verbatim, each carrying
   # its own aws:MultiFactorAuthPresent condition — the lab-operator user's routine (no-MFA)
   # session can never satisfy it, only a session re-assumed with a fresh MFA factor from
@@ -191,6 +193,17 @@ resource "aws_iam_role_policy" "lab_operator" {
         Sid      = "S3LandingPlaceholderPut"
         Effect   = "Allow"
         Action   = "s3:PutObject"
+        Resource = "arn:aws:s3:::caucell-*-landing/*"
+      },
+      {
+        # Routine (no-MFA) read of vendor landing objects — the `labvendors pull` flow mirrors
+        # a vendor's landing bucket down to the NAS. Read-only: delete / version-delete /
+        # governance-bypass on landing stay MFA-gated in BypassAndDeleteLockedObjects. Paired
+        # with the caucell-*-landing entry in AllowLabOperatorDecrypt (phi_kms.tf) — objects are
+        # SSE-KMS, so GetObject alone is not enough without the matching decrypt context.
+        Sid      = "S3LandingObjectRead"
+        Effect   = "Allow"
+        Action   = "s3:GetObject"
         Resource = "arn:aws:s3:::caucell-*-landing/*"
       },
       {
