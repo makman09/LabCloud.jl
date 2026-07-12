@@ -118,6 +118,10 @@ function config()
     haskey(ENV, "LAB_OPERATOR_ROLE_ARN") || throw(AppError(
         "LAB_OPERATOR_ROLE_ARN is not set — export it or add it to LabCloud.jl/.env"))
     role_arn = ENV["LAB_OPERATOR_ROLE_ARN"]
+    # Single mount root the NAS sub-paths derive from, so a non-macOS host (e.g. a Linux
+    # server where the share mounts under /mnt) only needs to set NAS_BASE_PATH. An explicit
+    # NAS_RESEARCH_PATH / NAS_VENDORS_PATH still overrides the derived default.
+    nas_base = get(ENV, "NAS_BASE_PATH", "/Volumes/CaucellVolumeI")
     AppConfig(
         role_arn,
         get(ENV, "AWS_REGION", "us-east-1"),
@@ -127,8 +131,8 @@ function config()
         get(ENV, "LAB_VENDORS_GROUP", "LabVendors"),
         get(ENV, "DB_PATH", "lab_customers.db"),
         parse(Int, get(ENV, "MULTIPART_ABORT_DAYS", "7")),
-        get(ENV, "NAS_RESEARCH_PATH", "/Volumes/CaucellVolumeI/Research"),
-        get(ENV, "NAS_VENDORS_PATH", "/Volumes/CaucellVolumeI/Vendors"),
+        get(ENV, "NAS_RESEARCH_PATH", joinpath(nas_base, "Research")),
+        get(ENV, "NAS_VENDORS_PATH", joinpath(nas_base, "Vendors")),
         get(ENV, "SYNC_PROGRESS_DIR", joinpath(homedir(), ".caucell", "sync_progress")),
         parse(Int, get(ENV, "SYNC_WORKERS", "10")),
     )
